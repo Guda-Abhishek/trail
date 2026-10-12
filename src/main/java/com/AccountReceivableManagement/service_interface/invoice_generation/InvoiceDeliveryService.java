@@ -18,7 +18,11 @@ public interface InvoiceDeliveryService {
      * returned to the caller - a failed send never throws past this point
      * and never leaves the delivery state ambiguous. {@link
      * com.AccountReceivableManagement.entity.invoice_generation.Invoice#getStatus()}
-     * is never modified by this method.
+     * is never modified by this method. Once a {@code SENT} outcome has
+     * committed, the invoice's single {@code Receivable} is created in its
+     * own transaction (or reused on a resend); a failure there is logged and
+     * leaves the SENT record intact for recovery. A {@code FAILED} outcome
+     * creates no receivable.
      */
     InvoiceDeliveryResponseDto sendInvoice(UUID invoiceId);
 
