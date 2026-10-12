@@ -15,10 +15,16 @@ import com.AccountReceivableManagement.service_interface.email.EmailService;
 import com.AccountReceivableManagement.service_interface.invoice_generation.InvoiceDeliveryService;
 import com.AccountReceivableManagement.service_interface.invoice_generation.InvoiceDocumentService;
 import com.AccountReceivableManagement.service_interface.invoice_generation.InvoiceService;
+import com.AccountReceivableManagement.service_interface.receivable.ReceivableService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -50,6 +56,10 @@ public class InvoiceDeliveryServiceImpl implements InvoiceDeliveryService {
     private final InvoiceDocumentService invoiceDocumentService;
 
     private final EmailService emailService;
+
+    private final ReceivableService receivableService;
+
+    private final PlatformTransactionManager transactionManager;
 
     @Override
     public InvoiceDeliveryResponseDto sendInvoice(UUID invoiceId) {
@@ -106,6 +116,8 @@ public class InvoiceDeliveryServiceImpl implements InvoiceDeliveryService {
 
         InvoiceDelivery saved = invoiceDeliveryRepository.save(delivery);
 
+        createReceivableAfterCommit(invoiceId, invoiceResponse.getInvoiceNumber());
+
         return mapToResponse(saved, invoiceResponse.getInvoiceNumber());
     }
 
@@ -124,6 +136,34 @@ public class InvoiceDeliveryServiceImpl implements InvoiceDeliveryService {
                 .stream()
                 .map(delivery -> mapToResponse(delivery, invoice.getInvoiceNumber()))
                 .toList();
+    }
+
+    /**
+     * Creates the invoice's receivable once the SENT delivery has committed,
+     * in its own transaction. The email has already left by then, so a
+     * receivable failure must not roll back the SENT record: keeping it is
+     * what lets the missing receivable be recovered later through
+     * {@link ReceivableService#createReceivableFromInvoice} without sending
+     * the invoice again. REQUIRES_NEW is needed because data access inside
+     * afterCommit would otherwise join the already-committed transaction.
+     */
+    private void createReceivableAfterCommit(UUID invoiceId, String invoiceNumber) {
+
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                TransactionTemplate requiresNew = new TransactionTemplate(transactionManager);
+                requiresNew.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+                try {
+                    requiresNew.executeWithoutResult(status ->
+                            receivableService.createReceivableFromInvoice(invoiceId));
+                } catch (RuntimeException ex) {
+                    log.error("Invoice {} ({}) was sent but its receivable could not be created; "
+                                    + "recover with ReceivableService.createReceivableFromInvoice - do not resend",
+                            invoiceNumber, invoiceId, ex);
+                }
+            }
+        });
     }
 
     private String resolveRecipientEmail(Invoice invoice) {
@@ -155,7 +195,8 @@ public class InvoiceDeliveryServiceImpl implements InvoiceDeliveryService {
                 || invoice.getInvoiceDate() == null
                 || invoice.getSubtotal() == null
                 || invoice.getTotalTaxAmount() == null
-                || invoice.getGrandTotal() == null) {
+                || invoice.getGrandTotal() == null
+                || invoice.getGrandTotal().signum() < 0) {
 
             throw new GlobalExceptionHandler.ValidationException(
                     "Invoice does not have valid invoice data required for delivery."

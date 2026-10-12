@@ -15,6 +15,8 @@ import com.AccountReceivableManagement.service_Imple.email.EmailDeliveryExceptio
 import com.AccountReceivableManagement.service_interface.email.EmailService;
 import com.AccountReceivableManagement.service_interface.invoice_generation.InvoiceDocumentService;
 import com.AccountReceivableManagement.service_interface.invoice_generation.InvoiceService;
+import com.AccountReceivableManagement.service_interface.receivable.ReceivableService;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -22,6 +24,9 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -57,6 +62,12 @@ class InvoiceDeliveryServiceImplTest {
     @Mock
     private EmailService emailService;
 
+    @Mock
+    private ReceivableService receivableService;
+
+    @Mock
+    private PlatformTransactionManager transactionManager;
+
     @InjectMocks
     private InvoiceDeliveryServiceImpl invoiceDeliveryService;
 
@@ -64,6 +75,9 @@ class InvoiceDeliveryServiceImplTest {
 
     @BeforeEach
     void setUp() {
+        // sendInvoice registers an after-commit callback; stand in for the
+        // @Transactional boundary that is absent in a plain unit test.
+        TransactionSynchronizationManager.initSynchronization();
         invoiceId = UUID.randomUUID();
         lenient().when(invoiceDeliveryRepository.save(any(InvoiceDelivery.class)))
                 .thenAnswer(invocation -> {
@@ -73,6 +87,11 @@ class InvoiceDeliveryServiceImplTest {
                     }
                     return delivery;
                 });
+    }
+
+    @AfterEach
+    void tearDown() {
+        TransactionSynchronizationManager.clearSynchronization();
     }
 
     private Invoice approvedInvoice() {
@@ -147,6 +166,13 @@ class InvoiceDeliveryServiceImplTest {
         // Invoice status itself is never touched by delivery.
         assertThat(invoice.getStatus()).isEqualTo(InvoiceStatus.APPROVED);
         verify(invoiceRepository, never()).save(any());
+
+        // A SENT outcome creates the invoice's receivable - only once the
+        // SENT delivery has committed.
+        verifyNoInteractions(receivableService);
+        TransactionSynchronizationManager.getSynchronizations()
+                .forEach(TransactionSynchronization::afterCommit);
+        verify(receivableService).createReceivableFromInvoice(invoiceId);
 
         ArgumentCaptor<InvoiceDelivery> captor = ArgumentCaptor.forClass(InvoiceDelivery.class);
         verify(invoiceDeliveryRepository, atLeastOnce()).save(captor.capture());
@@ -274,6 +300,7 @@ class InvoiceDeliveryServiceImplTest {
         ArgumentCaptor<InvoiceDelivery> captor = ArgumentCaptor.forClass(InvoiceDelivery.class);
         verify(invoiceDeliveryRepository, atLeastOnce()).save(captor.capture());
         assertThat(captor.getValue().getStatus()).isEqualTo(InvoiceDeliveryStatus.FAILED);
+        verifyNoInteractions(receivableService);
     }
 
     // 7. Gmail/email service failure -> 9. Delivery status becomes FAILED after email failure.
@@ -303,6 +330,9 @@ class InvoiceDeliveryServiceImplTest {
         // Never silently marked SENT.
         assertThat(result.getDeliveryStatus()).isNotEqualTo(InvoiceDeliveryStatus.SENT);
         assertThat(result.getSentAt()).isNull();
+
+        // A FAILED delivery never creates a receivable.
+        verifyNoInteractions(receivableService);
     }
 
     // 10. Delivery history retrieval.
