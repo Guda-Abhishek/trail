@@ -115,6 +115,11 @@
     private java.util.List<BillingTMRateCardResponseDto> tmRateCards;
     private java.util.List<BillingScheduleResponseDto> milestoneSchedules;
 
+    // Milestone Plan: the configured plan (payment structure + payment entries).
+    // milestoneSchedules above are the generated occurrences, which only exist after approval.
+    private PaymentStructure paymentStructure;
+    private BillingMilestonePlanResponseDto milestonePlanDetails;
+
     // Change tracking for pending approval
     private java.util.List<BillingConfigurationChangeDto> changes;
     private String previousApprovalStatus;
