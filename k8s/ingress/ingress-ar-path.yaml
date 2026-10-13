@@ -1,0 +1,9 @@
+# NOT a standalone manifest - add this entry under
+# spec.rules[0].http.paths in intranet-devops k8s/ingress/ingress.yaml
+          - path: /paves/ar
+            pathType: Prefix
+            backend:
+              service:
+                name: ar-service
+                port:
+                  number: 8080
