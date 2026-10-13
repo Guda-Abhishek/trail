@@ -225,17 +225,23 @@ public class BillingMilestonePlanServiceImpl implements BillingMilestonePlanServ
                                         "Billing Configuration not found."
                                 ));
 
-        BillingMilestonePlan milestonePlan =
-                billingMilestonePlanRepository.findByBillingConfigurationAndIsActiveTrue(configuration)
-                        .orElseThrow(() ->
-                                new GlobalExceptionHandler.ResourceNotFoundException(
-                                        "Milestone Plan Configuration not found for this billing configuration."
-                                ));
+        return findActiveByBillingConfiguration(configuration)
+                .orElseThrow(() ->
+                        new GlobalExceptionHandler.ResourceNotFoundException(
+                                "Milestone Plan Configuration not found for this billing configuration."
+                        ));
+    }
 
-        List<BillingPaymentEntry> entries =
-                billingPaymentEntryRepository.findByMilestonePlanAndIsActiveTrueOrderBySequenceAsc(milestonePlan);
+    @Override
+    @Transactional(readOnly = true)
+    public java.util.Optional<BillingMilestonePlanResponseDto> findActiveByBillingConfiguration(
+            BillingConfiguration configuration) {
 
-        return mapToResponse(milestonePlan, entries);
+        return billingMilestonePlanRepository.findByBillingConfigurationAndIsActiveTrue(configuration)
+                .map(milestonePlan -> mapToResponse(
+                        milestonePlan,
+                        billingPaymentEntryRepository
+                                .findByMilestonePlanAndIsActiveTrueOrderBySequenceAsc(milestonePlan)));
     }
 
     @Override

@@ -2,13 +2,19 @@ package com.AccountReceivableManagement.service_Imple.projectbilling_config;
 
 import com.AccountReceivableManagement.entity.client_entity.Client;
 import com.AccountReceivableManagement.entity.project_entity.ProjectMasterReference;
+import com.AccountReceivableManagement.dto.projectbilling_config.BillingMilestonePlanResponseDto;
+import com.AccountReceivableManagement.dto.projectbilling_config.BillingPaymentEntryResponseDto;
 import com.AccountReceivableManagement.entity.projectbilling_config.BillingConfiguration;
+import com.AccountReceivableManagement.entity.projectbilling_config.BillingTypeMaster;
 import com.AccountReceivableManagement.entity_enums.projectbilling_config.ApprovalStatus;
+import com.AccountReceivableManagement.entity_enums.projectbilling_config.PaymentStructure;
 import com.AccountReceivableManagement.global_exception_handler.GlobalExceptionHandler;
 import com.AccountReceivableManagement.repo.billing_data_acquisition.BillingSnapshotRepository;
 import com.AccountReceivableManagement.repo.client.ClientRepository;
 import com.AccountReceivableManagement.repo.project.ProjectMasterReferenceRepository;
 import com.AccountReceivableManagement.repo.projectbilling_config.*;
+import com.AccountReceivableManagement.service_interface.concurrency_approval.RecordActionLockService;
+import com.AccountReceivableManagement.service_interface.projectbilling_config.BillingMilestonePlanService;
 import com.AccountReceivableManagement.service_interface.projectbilling_config.BillingPeriodCalculatorService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -16,6 +22,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -50,7 +59,9 @@ class BillingConfigurationServiceImplTest {
     @Mock private BillingPeriodCalculatorService billingPeriodCalculatorService;
     @Mock private BillingMilestonePlanRepository billingMilestonePlanRepository;
     @Mock private BillingPaymentEntryRepository billingPaymentEntryRepository;
+    @Mock private BillingMilestonePlanService billingMilestonePlanService;
     @Mock private BillingConfigurationChangeTrackingService changeTrackingService;
+    @Mock private RecordActionLockService recordActionLockService;
     @Mock private BillingConfigurationSnapshotRepository snapshotRepository;
 
     private BillingConfigurationServiceImpl service;
@@ -80,7 +91,9 @@ class BillingConfigurationServiceImplTest {
                 billingPeriodCalculatorService,
                 billingMilestonePlanRepository,
                 billingPaymentEntryRepository,
+                billingMilestonePlanService,
                 changeTrackingService,
+                recordActionLockService,
                 snapshotRepository);
 
         configurationId = UUID.randomUUID();
@@ -286,5 +299,88 @@ class BillingConfigurationServiceImplTest {
 
         assertThat(response.getCountryName()).isNull();
         assertThat(response.getCountryCode()).isNull();
+    }
+
+    // =========================================================
+    // Pending approvals: Milestone Plan payment structure
+    // =========================================================
+
+    private BillingConfiguration pendingConfiguration(String billingTypeName) {
+        BillingConfiguration configuration = BillingConfiguration.builder()
+                .billingConfigurationId(UUID.randomUUID())
+                .approvalStatus(ApprovalStatus.PENDING_APPROVAL)
+                .billingType(BillingTypeMaster.builder().billingTypeName(billingTypeName).build())
+                .build();
+        when(billingConfigurationRepository.findByApprovalStatus(ApprovalStatus.PENDING_APPROVAL))
+                .thenReturn(List.of(configuration));
+        return configuration;
+    }
+
+    private BillingMilestonePlanResponseDto milestonePlan(PaymentStructure structure, BigDecimal... percentages) {
+        List<BillingPaymentEntryResponseDto> entries = new java.util.ArrayList<>();
+        for (int i = 0; i < percentages.length; i++) {
+            entries.add(BillingPaymentEntryResponseDto.builder()
+                    .sequence(i + 1)
+                    .percentage(percentages[i])
+                    .amount(new BigDecimal("95000.00").multiply(percentages[i]).divide(new BigDecimal("100")))
+                    .billingDate(LocalDate.of(2026, 10, 12).plusDays(i))
+                    .build());
+        }
+        return BillingMilestonePlanResponseDto.builder()
+                .paymentStructure(structure)
+                .totalContractValue(new BigDecimal("95000.00"))
+                .entries(entries)
+                .build();
+    }
+
+    @Test
+    void getPendingApprovals_milestoneInstallmentsBeforeFirstApproval_exposesPaymentStructureAndEntries() {
+        BillingConfiguration configuration = pendingConfiguration("Milestone Plan");
+        when(billingMilestonePlanService.findActiveByBillingConfiguration(configuration))
+                .thenReturn(Optional.of(milestonePlan(PaymentStructure.INSTALLMENTS,
+                        new BigDecimal("40"), new BigDecimal("20"), new BigDecimal("40"))));
+
+        var response = service.getPendingApprovals().get(0);
+
+        assertThat(response.getPaymentStructure()).isEqualTo(PaymentStructure.INSTALLMENTS);
+        assertThat(response.getMilestonePlanDetails().getEntries())
+                .extracting(BillingPaymentEntryResponseDto::getPercentage)
+                .containsExactly(new BigDecimal("40"), new BigDecimal("20"), new BigDecimal("40"));
+        // Occurrences are only generated on approval
+        assertThat(response.getMilestoneSchedules()).isEmpty();
+    }
+
+    @Test
+    void getPendingApprovals_milestoneFullPayment_isNotReportedAsInstallments() {
+        BillingConfiguration configuration = pendingConfiguration("Milestone Plan");
+        when(billingMilestonePlanService.findActiveByBillingConfiguration(configuration))
+                .thenReturn(Optional.of(milestonePlan(PaymentStructure.FULL_PAYMENT, new BigDecimal("100"))));
+
+        var response = service.getPendingApprovals().get(0);
+
+        assertThat(response.getPaymentStructure()).isEqualTo(PaymentStructure.FULL_PAYMENT);
+        assertThat(response.getMilestonePlanDetails().getEntries()).hasSize(1);
+    }
+
+    @Test
+    void getPendingApprovals_recurring_hasNoMilestonePaymentStructure() {
+        pendingConfiguration("Recurring");
+
+        var response = service.getPendingApprovals().get(0);
+
+        assertThat(response.getPaymentStructure()).isNull();
+        assertThat(response.getMilestonePlanDetails()).isNull();
+        verifyNoInteractions(billingMilestonePlanService);
+    }
+
+    @Test
+    void getPendingApprovals_timesheetBased_hasNoMilestonePaymentStructure() {
+        pendingConfiguration("Timesheet Based");
+
+        var response = service.getPendingApprovals().get(0);
+
+        assertThat(response.getPaymentStructure()).isNull();
+        assertThat(response.getMilestonePlanDetails()).isNull();
+        verifyNoInteractions(billingMilestonePlanService);
     }
 }

@@ -16,6 +16,7 @@ import com.AccountReceivableManagement.repo.project.ProjectMasterReferenceReposi
 import com.AccountReceivableManagement.repo.projectbilling_config.*;
 import com.AccountReceivableManagement.service_interface.concurrency_approval.RecordActionLockService;
 import com.AccountReceivableManagement.service_interface.projectbilling_config.BillingConfigurationService;
+import com.AccountReceivableManagement.service_interface.projectbilling_config.BillingMilestonePlanService;
 import com.AccountReceivableManagement.service_interface.projectbilling_config.BillingPeriodCalculatorService;
 import com.AccountReceivableManagement.global_exception_handler.GlobalExceptionHandler;
 import com.AccountReceivableManagement.global_exception_handler.GlobalExceptionHandler.ResourceNotFoundException;
@@ -58,6 +59,7 @@ public class BillingConfigurationServiceImpl implements BillingConfigurationServ
     private final BillingPeriodCalculatorService billingPeriodCalculatorService;
     private final BillingMilestonePlanRepository billingMilestonePlanRepository;
     private final BillingPaymentEntryRepository billingPaymentEntryRepository;
+    private final BillingMilestonePlanService billingMilestonePlanService;
     private final BillingConfigurationChangeTrackingService changeTrackingService;
     private final RecordActionLockService recordActionLockService;
     private final com.AccountReceivableManagement.repo.projectbilling_config.BillingConfigurationSnapshotRepository snapshotRepository;
@@ -705,6 +707,12 @@ public class BillingConfigurationServiceImpl implements BillingConfigurationServ
                 builder.tmRateCards(getTMRateCards(configuration));
             } else if ("Milestone Plan".equalsIgnoreCase(billingTypeName)) {
                 builder.milestoneSchedules(getMilestoneSchedules(configuration));
+
+                BillingMilestonePlanResponseDto milestonePlan = getMilestonePlanDetails(configuration);
+                if (milestonePlan != null) {
+                    builder.milestonePlanDetails(milestonePlan);
+                    builder.paymentStructure(milestonePlan.getPaymentStructure());
+                }
             }
         }
 
@@ -874,6 +882,18 @@ public class BillingConfigurationServiceImpl implements BillingConfigurationServ
             log.error("Error fetching milestone schedules for configuration: {}",
                     configuration.getBillingConfigurationId(), e);
             return java.util.Collections.emptyList();
+        }
+    }
+
+    private BillingMilestonePlanResponseDto getMilestonePlanDetails(BillingConfiguration configuration) {
+        try {
+            return billingMilestonePlanService
+                    .findActiveByBillingConfiguration(configuration)
+                    .orElse(null);
+        } catch (Exception e) {
+            log.error("Error fetching milestone plan details for configuration: {}",
+                    configuration.getBillingConfigurationId(), e);
+            return null;
         }
     }
 
