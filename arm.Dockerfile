@@ -1,7 +1,9 @@
 # ==============================
 # 1️⃣ Build Stage (Maven + JDK)
 # ==============================
-FROM maven:3.9.9-eclipse-temurin-21 AS builder
+# Runs on the build machine's native platform: the JAR is platform-independent,
+# and running Maven/JDK 21 under QEMU arm64 emulation segfaults (exit 139).
+FROM --platform=$BUILDPLATFORM maven:3.9.9-eclipse-temurin-21 AS builder
 
 WORKDIR /app
 
