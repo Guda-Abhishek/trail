@@ -8,6 +8,8 @@ import com.lowagie.text.*;
 import com.lowagie.text.pdf.PdfPCell;
 import com.lowagie.text.pdf.PdfPTable;
 import com.lowagie.text.pdf.PdfWriter;
+import com.AccountReceivableManagement.service_interface.company_profile.CompanySignatureService;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.awt.Color;
@@ -45,6 +47,21 @@ public class InvoiceDocumentServiceImpl implements InvoiceDocumentService {
 
     private static final Color HEADER_BACKGROUND = new Color(51, 51, 51);
 
+    private static final org.slf4j.Logger log =
+            org.slf4j.LoggerFactory.getLogger(InvoiceDocumentServiceImpl.class);
+
+    /** Null when constructed without Spring (e.g. layout-only tests): no signature is rendered. */
+    private final CompanySignatureService signatureService;
+
+    public InvoiceDocumentServiceImpl() {
+        this.signatureService = null;
+    }
+
+    @Autowired
+    public InvoiceDocumentServiceImpl(CompanySignatureService signatureService) {
+        this.signatureService = signatureService;
+    }
+
     @Override
     public byte[] generateInvoicePdf(InvoiceResponseDto invoice) {
 
@@ -77,6 +94,8 @@ public class InvoiceDocumentServiceImpl implements InvoiceDocumentService {
             addTextSection(document, "Payment Instructions", invoice.getPaymentInstructions());
             addTextSection(document, "Terms & Conditions", invoice.getTermsAndConditions());
 
+            addAuthorizedSignatory(document, invoice);
+
             document.close();
 
             return outputStream.toByteArray();
@@ -93,6 +112,44 @@ public class InvoiceDocumentServiceImpl implements InvoiceDocumentService {
                 document.close();
             }
         }
+    }
+
+    /**
+     * Prints the invoice's own frozen signature image above a plain
+     * "Authorized Signatory" caption. Nothing is printed when the invoice has
+     * no signature, or the stored asset is missing or unreadable - in which
+     * case the PDF is still produced. No claim of digital signing or approval
+     * is made.
+     */
+    private void addAuthorizedSignatory(Document document, InvoiceResponseDto invoice) throws DocumentException {
+        String reference = invoice.getSellerSignatureReference();
+        if (reference == null || reference.isBlank() || signatureService == null) {
+            return;
+        }
+        Image image;
+        try {
+            image = signatureService.findImage(reference)
+                    .map(stored -> {
+                        try {
+                            return Image.getInstance(stored.content());
+                        } catch (Exception ex) {
+                            return null;
+                        }
+                    })
+                    .orElse(null);
+        } catch (RuntimeException ex) {
+            image = null;
+        }
+        if (image == null) {
+            log.warn("[InvoicePdf] signature asset {} for invoice {} is unavailable; rendering without it.",
+                    reference, invoice.getInvoiceNumber());
+            return;
+        }
+        image.scaleToFit(150, 60);
+        image.setAlignment(Image.LEFT);
+        document.add(Chunk.NEWLINE);
+        document.add(image);
+        document.add(new Paragraph("Authorized Signatory", BODY_FONT));
     }
 
     private void addSellerAndBuyer(

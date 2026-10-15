@@ -56,6 +56,10 @@ public class CompanyProfile {
     @Column(name = "phone", length = 30)
     private String phone;
 
+    /** Opaque id of the current authorized-signatory signature asset (company_signature_asset); null when none. */
+    @Column(name = "authorized_signature_reference", length = 36)
+    private String authorizedSignatureReference;
+
     @Column(name = "logo_reference", length = 500)
     private String logoReference;
 

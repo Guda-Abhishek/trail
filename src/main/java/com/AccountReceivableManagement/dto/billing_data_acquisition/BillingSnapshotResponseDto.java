@@ -164,6 +164,61 @@ public class BillingSnapshotResponseDto {
     @Builder.Default
     private List<TimesheetLineItemDto> timesheets = new ArrayList<>();
 
+    /**
+     * Persisted client-billable expense lines (XMS) of this snapshot, kept
+     * separate from labor {@code timesheets}. Always present; empty when the
+     * snapshot has no expenses. Their {@code costBasis} values sum to
+     * {@code expenseAmount}.
+     */
+    @Builder.Default
+    private List<ExpenseLineItemDto> expenses = new ArrayList<>();
+
+    /**
+     * One expense row. {@code costBasis} is the billed amount in the snapshot currency (as supplied by XMS,
+     * or converted from {@code sourceAmount}); tax fields are audit-only and not exposed here. Everything is
+     * read back from what was persisted at acquisition - nothing is recalculated.
+     */
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Builder
+    public static class ExpenseLineItemDto {
+        /** XMS lineItemId (the idempotency key) - the identity of the underlying expense. */
+        private String sourceReferenceId;
+        /** Same value as {@link #sourceReferenceId}, named explicitly for clients. */
+        private String lineItemId;
+        private LocalDate expenseDate;
+        private String category;
+        private String description;
+        private String reportNumber;
+        private String currency;
+        private BigDecimal costBasis;
+        /** Origin system, "XMS". */
+        private String sourceSystem;
+        /** XMS handoff event (syncId) this line was billed from. */
+        private String syncId;
+        /** When XMS recorded that handoff event (from the frozen acquisition metadata); null if not stored. */
+        private java.time.LocalDateTime handedOffAt;
+        private String handoffRemarks;
+        /** syncIds of earlier handoff events of this line item that this one superseded (empty if none). */
+        @Builder.Default
+        private List<String> supersededSyncIds = new ArrayList<>();
+        /** The employee's original expense currency/amount (audit only, never billed); null when not stored. */
+        private String originalCurrency;
+        private BigDecimal originalAmount;
+        /**
+         * True only when a currency conversion was performed and persisted for this line (the exchange-rate
+         * audit fields below are set). Never inferred from a currency mismatch.
+         */
+        private boolean conversionApplied;
+        private BigDecimal sourceAmount;
+        private String sourceCurrency;
+        private BigDecimal exchangeRate;
+        private LocalDate exchangeRateDate;
+        private String exchangeRateSource;
+    }
+
 
     /**
      * One row in the Labor Charges Preview table shown in AcquireDataStep.jsx.
@@ -190,5 +245,17 @@ public class BillingSnapshotResponseDto {
         private String sourceReferenceId;
         /** Project role — used for ROLE_BASED billing rate lookup. */
         private String role;
+        /** Standard base rate before discount ("rate" above is the net rate); null on older lines. */
+        private BigDecimal baseRate;
+        private String currencyCode;
+        private String ratePeriod;
+        private String discountType;
+        private BigDecimal discountValue;
+        private BigDecimal discountAmount;
+        private String discountPeriodName;
+        private LocalDate discountPeriodStart;
+        private LocalDate discountPeriodEnd;
+        /** false = kept for audit, excluded from totals, tax and invoice. */
+        private Boolean includeInInvoice;
     }
 }

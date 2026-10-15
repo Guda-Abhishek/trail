@@ -137,14 +137,26 @@ public class BillingSnapshotServiceImpl implements BillingSnapshotService {
 
         UUID clientId = projectMasterDataService.getClientIdByProjectId(request.getProjectId());
 
+        log.info("[BillingSnapshotStage] stage=acquire projectId={} billingConfigurationId={} period={}..{} billingType={}",
+                request.getProjectId(), request.getBillingConfigurationId(),
+                request.getBillingPeriodStart(), request.getBillingPeriodEnd(), configuration.getBillingType());
         BillingAcquisitionResultDto acquisitionResult = strategy.acquire(configuration, request);
+        log.info("[BillingSnapshotStage] stage=acquired projectId={} timesheets={} expenses={}",
+                request.getProjectId(),
+                acquisitionResult != null && acquisitionResult.getTimesheets() != null
+                        ? acquisitionResult.getTimesheets().size() : 0,
+                acquisitionResult != null && acquisitionResult.getExpenses() != null
+                        ? acquisitionResult.getExpenses().size() : 0);
 
         ValidationResultDto validationResult = billingAcquisitionValidator.validate(acquisitionResult);
         if (!validationResult.isSuccess()) {
+            log.warn("[BillingSnapshotStage] stage=validation-failed projectId={} reason={}",
+                    request.getProjectId(), validationResult.getValidationMessage());
             return ApiResponse.failure(validationResult.getValidationMessage());
         }
 
-        BillingAmountSummary amounts = calculateAmounts(validationResult.getAcquisitionResult().getTimesheets());
+        BillingAmountSummary amounts = calculateAmounts(validationResult.getAcquisitionResult().getTimesheets(),
+                validationResult.getAcquisitionResult().getExpenses());
         String snapshotNumber = generateSnapshotNumber();
         String createdBy = "SYSTEM";
         BillingSnapshotStatus status = BillingSnapshotStatus.READY_FOR_TAX;
@@ -289,9 +301,12 @@ public class BillingSnapshotServiceImpl implements BillingSnapshotService {
         }
 
         List<TimesheetDto> timesheets = validationResult.getAcquisitionResult().getTimesheets();
-        BillingAmountSummary amounts = calculateAmounts(timesheets);
+        keepFrozenConversions(snapshot, validationResult.getAcquisitionResult().getExpenses());
+        BillingAmountSummary amounts = calculateAmounts(timesheets,
+                validationResult.getAcquisitionResult().getExpenses());
 
-        List<BillingSnapshotItem> rebuiltItems = billingSnapshotBuilder.buildItems(timesheets);
+        List<BillingSnapshotItem> rebuiltItems = billingSnapshotBuilder.buildItems(timesheets,
+                validationResult.getAcquisitionResult().getExpenses());
         rebuiltItems.forEach(item -> item.setBillingSnapshot(snapshot));
 
         // Replace items in place - the managed collection's orphanRemoval mapping
@@ -311,6 +326,39 @@ public class BillingSnapshotServiceImpl implements BillingSnapshotService {
         snapshot.setUpdatedDate(LocalDateTime.now());
 
         return billingSnapshotRepository.save(snapshot);
+    }
+
+    /**
+     * A rebuild re-acquires expenses, which re-converts any cross-currency line. An expense the snapshot
+     * already converted keeps its frozen rate and billed amount - a rebuild must never change an existing
+     * conversion. It applies only while XMS still reports the same source amount and currency; anything
+     * else (or a new expense) keeps the freshly acquired conversion.
+     */
+    private void keepFrozenConversions(BillingSnapshot snapshot,
+            List<com.AccountReceivableManagement.dto.billing_data_acquisition.ExpenseLineDto> expenses) {
+        if (expenses == null) {
+            return;
+        }
+        for (com.AccountReceivableManagement.dto.billing_data_acquisition.ExpenseLineDto expense : expenses) {
+            if (expense.getExchangeRate() == null) {
+                continue;
+            }
+            snapshot.getItems().stream()
+                    .filter(item -> item.getItemType() == com.AccountReceivableManagement.entity_enums
+                            .billing_data_acquisition.BillingItemType.EXPENSE)
+                    .filter(item -> expense.getLineItemId().equals(item.getSourceReferenceId()))
+                    .filter(item -> item.getExchangeRate() != null && item.getSourceAmount() != null
+                            && item.getSourceAmount().compareTo(expense.getSourceAmount()) == 0
+                            && item.getSourceCurrency() != null
+                            && item.getSourceCurrency().equalsIgnoreCase(expense.getSourceCurrency()))
+                    .findFirst()
+                    .ifPresent(item -> {
+                        expense.setCostBasis(item.getAmount());
+                        expense.setExchangeRate(item.getExchangeRate());
+                        expense.setExchangeRateDate(item.getExchangeRateDate());
+                        expense.setExchangeRateSource(item.getExchangeRateSource());
+                    });
+        }
     }
 
     private Optional<BillingSnapshot> findExistingSnapshot(BillingSnapshotCreateRequestDto request) {
@@ -443,12 +491,21 @@ public class BillingSnapshotServiceImpl implements BillingSnapshotService {
         return strategiesByBillingType.get(billingType);
     }
 
-    private BillingAmountSummary calculateAmounts(List<TimesheetDto> timesheets) {
+    static BillingAmountSummary calculateAmounts(List<TimesheetDto> timesheets,
+            List<com.AccountReceivableManagement.dto.billing_data_acquisition.ExpenseLineDto> expenses) {
+        // Lines excluded from the invoice stay on the snapshot for audit but never reach the payable
+        // subtotal, and therefore never the tax base (tax is calculated from the snapshot total).
         BigDecimal subtotal = timesheets.stream()
-                .map(timesheet -> timesheet.getHours().multiply(timesheet.getHourlyRate()))
+                .filter(timesheet -> com.AccountReceivableManagement.util.TmRateCalculator
+                        .isIncluded(timesheet.getIncludeInInvoice()))
+                .map(timesheet -> com.AccountReceivableManagement.util.TmRateCalculator
+                        .lineAmount(timesheet.getHours(), timesheet.getHourlyRate()))
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        BigDecimal expenseAmount = BigDecimal.ZERO;
+        // costBasis is already the billable base-currency amount: summed as-is.
+        BigDecimal expenseAmount = expenses == null ? BigDecimal.ZERO : expenses.stream()
+                .map(com.AccountReceivableManagement.dto.billing_data_acquisition.ExpenseLineDto::getCostBasis)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
 
         return BillingAmountSummary.builder()
                 .subtotal(subtotal)

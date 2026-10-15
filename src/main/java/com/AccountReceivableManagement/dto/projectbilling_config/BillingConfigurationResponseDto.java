@@ -31,6 +31,9 @@
 
         private Long projectId;
 
+        /** Numeric PMS project id of the configured project; null when the configuration has no project. */
+        private Long pmsProjectId;
+
         private String projectName;
 
         private String primaryLocation;

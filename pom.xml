@@ -16,7 +16,7 @@
 	<properties>
 		<java.version>21</java.version>
 		<debezium.version>3.2.0.Final</debezium.version>
-		<lombok.version>1.18.46</lombok.version>
+		<lombok.version>1.18.32</lombok.version>
 	</properties>
 <!--	<dependencyManagement>-->
 <!--		<dependencies>-->
@@ -49,6 +49,12 @@
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-validation</artifactId>
+		</dependency>
+		<dependency>
+			<!-- JWT signature verification for the signatory-signature endpoints (pinned; already used transitively) -->
+			<groupId>com.nimbusds</groupId>
+			<artifactId>nimbus-jose-jwt</artifactId>
+			<version>9.37.3</version>
 		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
@@ -147,6 +153,13 @@
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+
+		<!-- In-memory database for repository/persistence tests only (production uses MySQL). -->
+		<dependency>
+			<groupId>com.h2database</groupId>
+			<artifactId>h2</artifactId>
 			<scope>test</scope>
 		</dependency>
 	</dependencies>

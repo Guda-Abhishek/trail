@@ -29,4 +29,7 @@ public class BillingTMRateCardRequestDto {
     private LocalDate effectiveTo;
 
     private String remarks;
+
+    /** Bills work at the base rate when no discount period applies. Defaults to true on create; omitted on update keeps the current value. */
+    private Boolean includeBaseRateInInvoice;
 }

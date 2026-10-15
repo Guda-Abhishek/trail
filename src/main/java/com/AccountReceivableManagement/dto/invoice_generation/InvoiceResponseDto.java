@@ -110,6 +110,9 @@ public class InvoiceResponseDto {
 
     private String sellerLogoReference;
 
+    /** Frozen signature asset id (null when none was configured at generation). */
+    private String sellerSignatureReference;
+
     /**
      * Saved on the invoice at generation; on a preview (not yet generated)
      * these show the currently configured defaults that generation will copy.

@@ -21,4 +21,11 @@ public class BillingAcquisitionResultDto {
 
     @Builder.Default
     private List<TimesheetDto> timesheets = new ArrayList<>();
+
+    /** True when expenses were looked up in XMS for this acquisition (expense billing on). */
+    private boolean expensesChecked;
+
+    /** Validated client-billable expenses (XMS); empty when none or expense billing is off. */
+    @Builder.Default
+    private List<ExpenseLineDto> expenses = new ArrayList<>();
 }

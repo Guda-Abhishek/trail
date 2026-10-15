@@ -60,6 +60,9 @@ public class BillingConfigurationResponseDto {
 
     private BigDecimal hourlyRate;
 
+    /** Null is treated as STANDARD. */
+    private com.AccountReceivableManagement.entity_enums.projectbilling_config.PricingModel pricingModel;
+
     private boolean expenseEligible;
 
     private boolean approved;

@@ -86,4 +86,90 @@ public class BillingSnapshotItem {
     /** Project role sourced from TMS — used for ROLE_BASED rate lookup. */
     @Column(name = "role", length = 100)
     private String role;
+
+    /** Originating system for lines not sourced from TMS (e.g. "XMS"); null for legacy lines. */
+    @Column(name = "source_system", length = 20)
+    private String sourceSystem;
+
+    /**
+     * Frozen JSON copy of the source record's audit/reconciliation fields
+     * (for XMS expenses: report number, employee, category, tax and original
+     * currency details, receipt ids, payload version). Never used to
+     * recompute amounts or output tax.
+     */
+    @Column(name = "source_metadata", columnDefinition = "TEXT")
+    private String sourceMetadata;
+
+    /**
+     * Handoff event identity (XMS {@code syncId}) of an EXPENSE line; null for other lines and for lines
+     * created before this field existed. Together with {@code sourceReferenceId} (the lineItemId) it
+     * distinguishes a repeat of the same handoff from a correction.
+     */
+    @Column(name = "source_event_id", length = 100)
+    private String sourceEventId;
+
+    // ---- expense currency-conversion audit (frozen at acquisition; null when no conversion) ----
+    // "amount" above stays the billed amount in the snapshot currency.
+
+    /** XMS costBasis before conversion. */
+    @Column(name = "source_amount", precision = 19, scale = 4)
+    private BigDecimal sourceAmount;
+
+    @Column(name = "source_currency", length = 10)
+    private String sourceCurrency;
+
+    /** Billing (snapshot) currency the amount was converted to. */
+    @Column(name = "target_currency", length = 10)
+    private String targetCurrency;
+
+    /** Units of target currency per 1 unit of source currency. */
+    @Column(name = "exchange_rate", precision = 19, scale = 8)
+    private BigDecimal exchangeRate;
+
+    @Column(name = "exchange_rate_date")
+    private LocalDate exchangeRateDate;
+
+    @Column(name = "exchange_rate_source", length = 255)
+    private String exchangeRateSource;
+
+    // ---- T&M Standard Rate Schedule calculation (frozen at acquisition; null on older lines) ----
+    // "rate" above is the effective NET rate and "amount" the final line amount (quantity x net rate).
+
+    @Column(name = "base_rate", precision = 19, scale = 2)
+    private BigDecimal baseRate;
+
+    /** Billing configuration currency the rates and amounts are in. */
+    @Column(name = "rate_currency", length = 10)
+    private String rateCurrency;
+
+    @Column(name = "rate_period", length = 20)
+    private String ratePeriod;
+
+    @Column(name = "discount_type", length = 20)
+    private String discountType;
+
+    @Column(name = "discount_value", precision = 19, scale = 2)
+    private BigDecimal discountValue;
+
+    @Column(name = "discount_amount", precision = 19, scale = 2)
+    private BigDecimal discountAmount;
+
+    @Column(name = "discount_period_id", length = 36)
+    private String discountPeriodId;
+
+    @Column(name = "discount_period_name", length = 150)
+    private String discountPeriodName;
+
+    @Column(name = "discount_period_start")
+    private LocalDate discountPeriodStart;
+
+    @Column(name = "discount_period_end")
+    private LocalDate discountPeriodEnd;
+
+    /**
+     * Inclusion decision. {@code false} keeps the line for audit but it is excluded from the snapshot totals,
+     * tax base and invoice items. Null (older lines, expenses) means included.
+     */
+    @Column(name = "include_in_invoice")
+    private Boolean includeInInvoice;
 }

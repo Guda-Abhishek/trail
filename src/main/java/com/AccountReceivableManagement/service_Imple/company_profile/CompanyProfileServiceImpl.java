@@ -181,6 +181,7 @@ public class CompanyProfileServiceImpl implements CompanyProfileService {
                 .email(companyProfile.getEmail())
                 .phone(companyProfile.getPhone())
                 .logoReference(companyProfile.getLogoReference())
+                .authorizedSignatureReference(companyProfile.getAuthorizedSignatureReference())
                 .defaultInvoiceNotes(companyProfile.getDefaultInvoiceNotes())
                 .defaultTermsAndConditions(companyProfile.getDefaultTermsAndConditions())
                 .defaultPaymentInstructions(companyProfile.getDefaultPaymentInstructions())

@@ -4,6 +4,10 @@ import com.AccountReceivableManagement.dto.projectbilling_config.BillingTMRateCa
 import com.AccountReceivableManagement.dto.projectbilling_config.BillingTMRateCardResponseDto;
 import com.AccountReceivableManagement.entity.projectbilling_config.BillingConfiguration;
 import com.AccountReceivableManagement.entity.projectbilling_config.BillingTMRateCard;
+import com.AccountReceivableManagement.entity.projectbilling_config.BillingTMRateDiscount;
+import com.AccountReceivableManagement.entity_enums.projectbilling_config.BillingRatePeriod;
+import com.AccountReceivableManagement.repo.projectbilling_config.BillingTMRateDiscountRepository;
+import com.AccountReceivableManagement.util.TmRateCalculator;
 import com.AccountReceivableManagement.entity_enums.projectbilling_config.ApprovalStatus;
 import com.AccountReceivableManagement.entity_enums.projectbilling_config.BillingConfigurationStatus;
 import com.AccountReceivableManagement.global_exception_handler.GlobalExceptionHandler;
@@ -29,6 +33,7 @@ import java.util.UUID;
 public class BillingTMRateCardServiceImpl implements BillingTMRateCardService {
 
     private final BillingTMRateCardRepository billingTMRateCardRepository;
+    private final BillingTMRateDiscountRepository billingTMRateDiscountRepository;
     private final BillingConfigurationRepository billingConfigurationRepository;
     private final RecordActionLockService recordActionLockService;
 
@@ -68,6 +73,9 @@ public class BillingTMRateCardServiceImpl implements BillingTMRateCardService {
                         .effectiveFrom(request.getEffectiveFrom())
                         .effectiveTo(request.getEffectiveTo())
                         .remarks(request.getRemarks())
+                        .includeBaseRateInInvoice(
+                                request.getIncludeBaseRateInInvoice() == null
+                                        || request.getIncludeBaseRateInInvoice())
                         .isActive(true)
                         .createdAt(LocalDateTime.now())
                         .updatedAt(LocalDateTime.now())
@@ -109,12 +117,19 @@ public class BillingTMRateCardServiceImpl implements BillingTMRateCardService {
                 request.getEffectiveFrom(),
                 request.getEffectiveTo());
 
+        // Revalidate the active discount periods against the new base rate BEFORE anything is mutated, so a
+        // rejected edit changes nothing (existing discounts are never altered or deleted here).
+        validateDiscountsAgainstNewBaseRate(rateCard, request);
+
         rateCard.setRoleName(request.getRoleName());
         rateCard.setRate(request.getRate());
         rateCard.setRatePeriod(request.getRatePeriod());
         rateCard.setEffectiveFrom(request.getEffectiveFrom());
         rateCard.setEffectiveTo(request.getEffectiveTo());
         rateCard.setRemarks(request.getRemarks());
+        if (request.getIncludeBaseRateInInvoice() != null) {
+            rateCard.setIncludeBaseRateInInvoice(request.getIncludeBaseRateInInvoice());
+        }
         rateCard.setUpdatedAt(LocalDateTime.now());
 
         BillingTMRateCard updated =
@@ -237,6 +252,9 @@ public class BillingTMRateCardServiceImpl implements BillingTMRateCardService {
                         .effectiveFrom(request.getEffectiveFrom())
                         .effectiveTo(request.getEffectiveTo())
                         .remarks(request.getRemarks())
+                        .includeBaseRateInInvoice(
+                                request.getIncludeBaseRateInInvoice() == null
+                                        || request.getIncludeBaseRateInInvoice())
                         .isActive(true)
                         .createdAt(LocalDateTime.now())
                         .updatedAt(LocalDateTime.now())
@@ -246,6 +264,33 @@ public class BillingTMRateCardServiceImpl implements BillingTMRateCardService {
                 billingTMRateCardRepository.save(rateCard);
 
         return mapToResponse(saved);
+    }
+
+    private void validateDiscountsAgainstNewBaseRate(
+            BillingTMRateCard rateCard,
+            BillingTMRateCardRequestDto request) {
+
+        List<BillingTMRateDiscount> discounts = billingTMRateDiscountRepository
+                .findByRateCard_RateCardIdAndIsActiveTrueOrderByEffectiveFromAsc(rateCard.getRateCardId());
+        if (discounts == null || discounts.isEmpty()) {
+            return;
+        }
+        // Discounts exist only on HOURLY rate cards (no billing-unit conversion is defined).
+        if (request.getRatePeriod() != BillingRatePeriod.HOURLY) {
+            throw new GlobalExceptionHandler.ValidationException(
+                    "The rate period cannot be changed to " + request.getRatePeriod()
+                            + " while the rate card has active discount periods; remove them first.");
+        }
+        for (BillingTMRateDiscount discount : discounts) {
+            try {
+                TmRateCalculator.apply(request.getRate(), discount.getDiscountType(), discount.getDiscountValue());
+            } catch (GlobalExceptionHandler.ValidationException ex) {
+                throw new GlobalExceptionHandler.ValidationException(
+                        "The new rate would invalidate the discount period '" + discount.getPeriodName()
+                                + "' (" + discount.getEffectiveFrom() + " to " + discount.getEffectiveTo()
+                                + "): " + ex.getMessage());
+            }
+        }
     }
 
     private void validateBillingConfiguration(
@@ -319,6 +364,7 @@ public class BillingTMRateCardServiceImpl implements BillingTMRateCardService {
                 .effectiveFrom(rateCard.getEffectiveFrom())
                 .effectiveTo(rateCard.getEffectiveTo())
                 .remarks(rateCard.getRemarks())
+                .includeBaseRateInInvoice(TmRateCalculator.isIncluded(rateCard.getIncludeBaseRateInInvoice()))
                 .createdAt(rateCard.getCreatedAt())
                 .updatedAt(rateCard.getUpdatedAt())
                 .build();
@@ -335,7 +381,7 @@ public class BillingTMRateCardServiceImpl implements BillingTMRateCardService {
      * 
      * @param configuration The billing configuration being edited
      */
-    private void handleApprovalStateTransition(BillingConfiguration configuration) {
+    static void handleApprovalStateTransition(BillingConfiguration configuration) {
         ApprovalStatus currentStatus = configuration.getApprovalStatus();
         
         switch (currentStatus) {

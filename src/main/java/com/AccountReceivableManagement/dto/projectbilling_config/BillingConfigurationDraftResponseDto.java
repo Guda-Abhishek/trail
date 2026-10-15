@@ -22,6 +22,9 @@ public class BillingConfigurationDraftResponseDto {
 
     private Long projectId;
 
+    /** Numeric PMS project id of the configured project; null when the draft has no project. */
+    private Long pmsProjectId;
+
     private UUID billingTypeId;
 
     private UUID billingFrequencyId;

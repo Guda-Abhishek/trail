@@ -88,6 +88,9 @@ public class BillingConfigurationIntegrationImpl implements BillingConfiguration
                 .hourlyRate(
                         epic1Configuration.getHourlyRate())
 
+                .pricingModel(
+                        epic1Configuration.getPricingModel())
+
                 .expenseEligible(
                         Boolean.TRUE.equals(
                                 epic1Configuration.getExpenseBillingEligible()))

@@ -16,6 +16,9 @@ public interface ProjectMasterReferenceRepository extends JpaRepository<ProjectM
 
     Optional<ProjectMasterReference> findBypmsProjectId(Long pmsProjectId);
 
+    /** How many of a client's projects share a project code (not unique in the schema). */
+    long countByClientIdAndProjectCodeIgnoreCase(UUID clientId, String projectCode);
+
     List<ProjectMasterReference> findByClientIdOrderByProjectNameAsc(UUID clientId);
 
     @Query("""
