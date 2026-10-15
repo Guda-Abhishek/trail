@@ -1,6 +1,7 @@
 package com.AccountReceivableManagement.validator.billing_data_acquisition;
 
 import com.AccountReceivableManagement.dto.billing_data_acquisition.BillingAcquisitionResultDto;
+import com.AccountReceivableManagement.dto.billing_data_acquisition.ExpenseLineDto;
 import com.AccountReceivableManagement.dto.billing_data_acquisition.TimesheetDto;
 import com.AccountReceivableManagement.dto.billing_data_acquisition.ValidationResultDto;
 import org.springframework.stereotype.Component;
@@ -24,8 +25,34 @@ public class BillingAcquisitionValidator {
         }
 
         List<TimesheetDto> timesheets = acquisitionResult.getTimesheets();
-        if (timesheets == null || timesheets.isEmpty()) {
-            return ValidationResultDto.failure("No timesheets were acquired for the requested billing period.");
+        List<ExpenseLineDto> expenses = acquisitionResult.getExpenses();
+        boolean hasExpenses = expenses != null && !expenses.isEmpty();
+        if ((timesheets == null || timesheets.isEmpty()) && !hasExpenses) {
+            return ValidationResultDto.failure(acquisitionResult.isExpensesChecked()
+                    ? "No expense eligible for this project duration, and no timesheets were acquired "
+                    + "for the requested billing period."
+                    : "No timesheets were acquired for the requested billing period.");
+        }
+        if (timesheets == null) {
+            timesheets = List.of();
+        }
+
+        if (hasExpenses) {
+            // Defence in depth: the XMS integration already validates each line.
+            Set<String> seenLineItemIds = new HashSet<>();
+            for (ExpenseLineDto expense : expenses) {
+                if (expense.getLineItemId() == null || expense.getLineItemId().isBlank()) {
+                    return ValidationResultDto.failure("An expense line has no lineItemId.");
+                }
+                if (expense.getCostBasis() == null || expense.getCostBasis().signum() < 0) {
+                    return ValidationResultDto.failure(
+                            "Expense [" + expense.getLineItemId() + "] has an invalid costBasis.");
+                }
+                if (!seenLineItemIds.add(expense.getLineItemId())) {
+                    return ValidationResultDto.failure(
+                            "Expense [" + expense.getLineItemId() + "] is a duplicate lineItemId.");
+                }
+            }
         }
 
         Set<String> seenSourceReferenceIds = new HashSet<>();
@@ -53,6 +80,16 @@ public class BillingAcquisitionValidator {
                 return ValidationResultDto.failure(
                         "Timesheet [" + timesheet.getSourceReferenceId() + "] is a duplicate source reference.");
             }
+        }
+
+        // Lines in a discount period excluded from invoicing stay on the snapshot for audit, but a snapshot
+        // with nothing payable at all (no included timesheet, no expense) would become a zero-value invoice.
+        boolean anyPayableTimesheet = timesheets.stream()
+                .anyMatch(t -> com.AccountReceivableManagement.util.TmRateCalculator.isIncluded(t.getIncludeInInvoice()));
+        if (!timesheets.isEmpty() && !anyPayableTimesheet && !hasExpenses) {
+            return ValidationResultDto.failure(
+                    "Every acquired timesheet falls in a discount period that is excluded from invoicing; "
+                            + "there is nothing payable to bill for the requested billing period.");
         }
 
         return ValidationResultDto.success(acquisitionResult);

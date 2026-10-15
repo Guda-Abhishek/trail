@@ -206,6 +206,10 @@ public class Invoice {
     @Column(name = "seller_phone", length = 30)
     private String sellerPhone;
 
+    /** Signature asset id frozen at generation; null on invoices issued before this existed or without a signature. */
+    @Column(name = "seller_signature_reference", length = 36)
+    private String sellerSignatureReference;
+
     @Column(name = "seller_logo_reference", length = 500)
     private String sellerLogoReference;
 

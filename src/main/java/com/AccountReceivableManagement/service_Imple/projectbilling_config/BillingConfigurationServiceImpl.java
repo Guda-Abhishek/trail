@@ -551,6 +551,10 @@ public class BillingConfigurationServiceImpl implements BillingConfigurationServ
                         configuration.getProject() != null
                                 ? configuration.getProject().getPmsProjectId()
                                 : null)
+                .pmsProjectId(
+                        configuration.getProject() != null
+                                ? configuration.getProject().getPmsProjectId()
+                                : null)
 
                 .primaryLocation(
                         configuration.getProject() != null
@@ -864,6 +868,8 @@ public class BillingConfigurationServiceImpl implements BillingConfigurationServ
                 .effectiveFrom(rateCard.getEffectiveFrom())
                 .effectiveTo(rateCard.getEffectiveTo())
                 .remarks(rateCard.getRemarks())
+                .includeBaseRateInInvoice(com.AccountReceivableManagement.util.TmRateCalculator
+                        .isIncluded(rateCard.getIncludeBaseRateInInvoice()))
                 .createdAt(rateCard.getCreatedAt())
                 .updatedAt(rateCard.getUpdatedAt())
                 .build();
@@ -1006,6 +1012,9 @@ public class BillingConfigurationServiceImpl implements BillingConfigurationServ
 
                     return ProjectResponseDto.builder()
                             .projectId(
+                                    project.getPmsProjectId()
+                            )
+                            .pmsProjectId(
                                     project.getPmsProjectId()
                             )
                             .projectName(
@@ -1971,6 +1980,10 @@ public class BillingConfigurationServiceImpl implements BillingConfigurationServ
                         configuration.getProject() != null
                                 ? configuration.getProject().getPmsProjectId()
                                 : null)
+                .pmsProjectId(
+                        configuration.getProject() != null
+                                ? configuration.getProject().getPmsProjectId()
+                                : null)
 
                 .billingTypeId(
                         configuration.getBillingType() != null
@@ -2290,6 +2303,7 @@ public class BillingConfigurationServiceImpl implements BillingConfigurationServ
                 .map(project ->
                         ProjectResponseDto.builder()
                                 .projectId(project.getPmsProjectId())
+                                .pmsProjectId(project.getPmsProjectId())
                                 .projectName(project.getProjectName())
                                 .projectCode(project.getProjectCode())
                                 .projectDuration(

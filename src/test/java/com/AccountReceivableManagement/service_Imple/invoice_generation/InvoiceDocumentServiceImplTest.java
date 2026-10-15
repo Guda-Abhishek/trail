@@ -161,4 +161,88 @@ class InvoiceDocumentServiceImplTest {
         assertThat(pdf).isNotEmpty();
         assertThat(new String(pdf, 0, 5)).isEqualTo("%PDF-");
     }
+
+    // ---- authorized signatory signature ---------------------------------
+
+    private static byte[] pngBytes() throws Exception {
+        java.awt.image.BufferedImage img = new java.awt.image.BufferedImage(60, 30, java.awt.image.BufferedImage.TYPE_INT_RGB);
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        javax.imageio.ImageIO.write(img, "png", out);
+        return out.toByteArray();
+    }
+
+    private static boolean containsImage(byte[] pdf) {
+        return new String(pdf, java.nio.charset.StandardCharsets.ISO_8859_1).replace(" ", "").contains("/Subtype/Image");
+    }
+
+    private static com.AccountReceivableManagement.service_interface.company_profile.CompanySignatureService stub(
+            java.util.function.Function<String, java.util.Optional<
+                    com.AccountReceivableManagement.service_interface.company_profile.CompanySignatureService.SignatureImage>> f) {
+        var mock = org.mockito.Mockito.mock(
+                com.AccountReceivableManagement.service_interface.company_profile.CompanySignatureService.class);
+        org.mockito.Mockito.when(mock.findImage(org.mockito.ArgumentMatchers.anyString()))
+                .thenAnswer(i -> f.apply(i.getArgument(0)));
+        return mock;
+    }
+
+    @Test
+    void pdf_rendersTheInvoiceOwnSignatureImage_whenPresent() throws Exception {
+        byte[] png = pngBytes();
+        var withSignature = new InvoiceDocumentServiceImpl(stub(ref -> ref.equals("sig-1")
+                ? java.util.Optional.of(new com.AccountReceivableManagement.service_interface.company_profile
+                        .CompanySignatureService.SignatureImage("image/png", png))
+                : java.util.Optional.empty()));
+        InvoiceResponseDto invoice = fullInvoice();
+        invoice.setSellerSignatureReference("sig-1");
+
+        byte[] pdf = withSignature.generateInvoicePdf(invoice);
+
+        assertThat(new String(pdf, 0, 5)).isEqualTo("%PDF-");
+        assertThat(containsImage(pdf)).isTrue();
+    }
+
+    @Test
+    void pdf_hasNoImageAndNoSignatureClaims_whenNoSignatureConfigured() throws Exception {
+        var svc = new InvoiceDocumentServiceImpl(stub(ref -> java.util.Optional.empty()));
+        InvoiceResponseDto invoice = fullInvoice();           // sellerSignatureReference == null (pre-feature invoice)
+
+        byte[] pdf = svc.generateInvoicePdf(invoice);
+
+        assertThat(containsImage(pdf)).isFalse();
+        assertThat(pdfText(pdf)).doesNotContain("Digitally").doesNotContain("Authorized Signatory");
+    }
+
+    @Test
+    void pdf_stillGenerates_whenTheReferencedAssetIsMissingOrCorrupt() throws Exception {
+        InvoiceResponseDto invoice = fullInvoice();
+        invoice.setSellerSignatureReference("deleted");
+
+        byte[] missing = new InvoiceDocumentServiceImpl(stub(ref -> java.util.Optional.empty()))
+                .generateInvoicePdf(invoice);
+        byte[] corrupt = new InvoiceDocumentServiceImpl(stub(ref -> java.util.Optional.of(
+                new com.AccountReceivableManagement.service_interface.company_profile
+                        .CompanySignatureService.SignatureImage("image/png", new byte[] {1, 2, 3}))))
+                .generateInvoicePdf(invoice);
+        byte[] failing = new InvoiceDocumentServiceImpl(stub(ref -> { throw new IllegalStateException("db down"); }))
+                .generateInvoicePdf(invoice);
+
+        for (byte[] pdf : new byte[][] {missing, corrupt, failing}) {
+            assertThat(new String(pdf, 0, 5)).isEqualTo("%PDF-");
+            assertThat(containsImage(pdf)).isFalse();
+        }
+    }
+
+    @Test
+    void pdf_neverPrintsDigitalSigningOrApprovalClaims_evenWithAnImage() throws Exception {
+        byte[] png = pngBytes();
+        var svc = new InvoiceDocumentServiceImpl(stub(ref -> java.util.Optional.of(
+                new com.AccountReceivableManagement.service_interface.company_profile
+                        .CompanySignatureService.SignatureImage("image/png", png))));
+        InvoiceResponseDto invoice = fullInvoice();
+        invoice.setSellerSignatureReference("sig-1");
+
+        String text = pdfText(svc.generateInvoicePdf(invoice));
+
+        assertThat(text).doesNotContain("Digitally Signed").doesNotContain("Digitally Verified").doesNotContain("Approved");
+    }
 }

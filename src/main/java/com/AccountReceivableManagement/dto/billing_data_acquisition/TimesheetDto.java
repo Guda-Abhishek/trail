@@ -61,5 +61,34 @@ public class TimesheetDto {
     private boolean approved;
 
     private boolean billable;
+
+    // ---- Standard Rate Schedule calculation, set by TimeAndMaterialBillingStrategy ----
+    // hourlyRate above is the effective NET rate (base rate after any discount period).
+
+    /** Standard base rate before any discount. */
+    private BigDecimal baseRate;
+
+    /** Billing configuration currency; the rate, discount and net rate are all in it. */
+    private String currencyCode;
+
+    /** Billing unit of the rate (always HOURLY for hours-based billing). */
+    private String ratePeriod;
+
+    private String discountType;
+
+    private BigDecimal discountValue;
+
+    private BigDecimal discountAmount;
+
+    private String discountPeriodId;
+
+    private String discountPeriodName;
+
+    private LocalDate discountPeriodStart;
+
+    private LocalDate discountPeriodEnd;
+
+    /** Null (no discount period applied) means included. */
+    private Boolean includeInInvoice;
 }
 

@@ -50,6 +50,20 @@ class ProjectDataProcessorImplTest {
         afterData.put("project_budget", new BigDecimal("67000.00"));
         afterData.put("project_budget_currency", "USD");
 
+        // The converter is a mock, so without a default every mapped field (including client_id) would be
+        // converted to null and overwrite the entity's clientId. Default: client_id -> UUID, others as-is.
+        lenient().when(valueConverter.convertValue(any(), any())).thenAnswer(invocation -> {
+            Object value = invocation.getArgument(0);
+            com.AccountReceivableManagement.cdc.mapping.ColumnMapping mapping = invocation.getArgument(1);
+            if (value instanceof String && mapping != null && "clientId".equals(mapping.getTargetField())) {
+                return UUID.fromString((String) value);
+            }
+            return value;
+        });
+        // process() re-reads the project after create/update to find the client whose budget to refresh.
+        lenient().when(projectMasterReferenceRepository.findBypmsProjectId(35L)).thenReturn(Optional.of(
+                ProjectMasterReference.builder().pmsProjectId(35L).clientId(clientId).build()));
+
         createPayload = CdcEventPayload.builder()
                 .connectorName("project-cdc")
                 .entityType("PMS-PROJECTS")

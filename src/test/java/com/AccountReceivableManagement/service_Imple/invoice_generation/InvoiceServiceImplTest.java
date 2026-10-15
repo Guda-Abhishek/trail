@@ -88,6 +88,9 @@ class InvoiceServiceImplTest {
         @Mock
         private CompanyProfileService companyProfileService;
 
+    @Mock
+    private com.AccountReceivableManagement.service_interface.concurrency_approval.RecordActionLockService recordActionLockService;
+
     @InjectMocks
     private InvoiceServiceImpl invoiceService;
 
@@ -122,6 +125,7 @@ class InvoiceServiceImplTest {
                 .email("billing@paves.example")
                 .phone("+91 40 1234 5678")
                 .logoReference("logos/paves.png")
+                .authorizedSignatureReference("sig-asset-1")
                 .defaultInvoiceNotes("TEST-NOTES-V1")
                 .defaultTermsAndConditions("TEST-TERMS-V1")
                 .defaultPaymentInstructions("TEST-PAYMENT-V1")
@@ -353,6 +357,7 @@ class InvoiceServiceImplTest {
         assertThat(response.getSellerEmail()).isEqualTo("billing@paves.example");
         assertThat(response.getSellerPhone()).isEqualTo("+91 40 1234 5678");
         assertThat(response.getSellerLogoReference()).isEqualTo("logos/paves.png");
+        assertThat(response.getSellerSignatureReference()).isEqualTo("sig-asset-1");
 
         // Client/CDC-derived fields are a separate concern and unaffected.
         assertThat(response.getClientId()).isEqualTo(clientId);
@@ -524,6 +529,7 @@ class InvoiceServiceImplTest {
         assertThat(response.getSellerEmail()).isEqualTo("billing@paves.example");
         assertThat(response.getSellerPhone()).isEqualTo("+91 40 1234 5678");
         assertThat(response.getSellerLogoReference()).isEqualTo("logos/paves.png");
+        assertThat(response.getSellerSignatureReference()).isEqualTo("sig-asset-1");
 
         // Client-side fields are a separate concern, still sourced independently.
         assertThat(response.getClientId()).isEqualTo(clientId);
@@ -772,6 +778,73 @@ class InvoiceServiceImplTest {
         assertThat(response.getItems()).singleElement()
                 .extracting("resourceName")
                 .isEqualTo("Jane Doe");
+    }
+
+    // A line the rate schedule excluded stays on the snapshot for audit but never becomes an invoice item.
+    @Test
+    void generateInvoice_excludedTimeEntry_isNotAnInvoiceItem() {
+        BillingSnapshot snapshot = taxCompletedSnapshot();
+        snapshot.getItems().add(BillingSnapshotItem.builder()
+                .billingSnapshotItemId(UUID.randomUUID()).billingSnapshot(snapshot)
+                .itemType(BillingItemType.TIME_ENTRY).itemName("Excluded Dev")
+                .sourceReferenceId("TMS-EXCL").quantity(new BigDecimal("10.00"))
+                .rate(new BigDecimal("80.00")).amount(new BigDecimal("800.00"))
+                .workDate(LocalDate.of(2026, 7, 16)).role("Developer")
+                .includeInInvoice(false).build());
+        TaxCalculation taxCalculation = completedTaxCalculation();
+
+        when(billingSnapshotRepository.findById(snapshotId)).thenReturn(Optional.of(snapshot));
+        when(taxCalculationRepository.findByBillingSnapshotId(snapshotId)).thenReturn(Optional.of(taxCalculation));
+        when(invoiceRepository.existsByBillingSnapshotId(snapshotId)).thenReturn(false);
+        when(billingConfigurationService.getBillingConfiguration(any())).thenReturn(configuration());
+        when(paymentTermsMasterRepository.findById(paymentTermId)).thenReturn(Optional.of(paymentTerms()));
+        when(invoiceRepository.save(any(Invoice.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(billingSnapshotRepository.save(any(BillingSnapshot.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        InvoiceResponseDto response = invoiceService.generateInvoice(snapshotId);
+
+        assertThat(response.getItems()).singleElement()
+                .extracting("sourceReferenceId").isEqualTo("TMS-1001");
+        assertThat(snapshot.getItems()).hasSize(2);
+    }
+
+    // A snapshot holding labor + an XMS expense: the invoice carries each
+    // snapshot item exactly once, and its subtotal is the tax calculation's
+    // taxable amount (labor + expense, counted once - not re-added).
+    @Test
+    void generateInvoice_snapshotWithExpenseItem_includesExpenseExactlyOnce() {
+        BillingSnapshot snapshot = taxCompletedSnapshot();
+        snapshot.setExpenseAmount(new BigDecimal("50.00"));
+        snapshot.setTotalAmount(new BigDecimal("5550.00"));
+        snapshot.getItems().add(BillingSnapshotItem.builder()
+                .billingSnapshotItemId(UUID.randomUUID()).billingSnapshot(snapshot)
+                .itemType(BillingItemType.EXPENSE).itemName("Travel")
+                .sourceReferenceId("XMS-L1").quantity(BigDecimal.ONE)
+                .rate(new BigDecimal("50.00")).amount(new BigDecimal("50.00"))
+                .workDate(LocalDate.of(2026, 7, 20)).sourceSystem("XMS").build());
+
+        TaxCalculation taxCalculation = completedTaxCalculation();
+        taxCalculation.setTaxableAmount(new BigDecimal("5550.00"));
+        taxCalculation.setGrandTotal(new BigDecimal("6540.00"));
+
+        when(billingSnapshotRepository.findById(snapshotId)).thenReturn(Optional.of(snapshot));
+        when(taxCalculationRepository.findByBillingSnapshotId(snapshotId)).thenReturn(Optional.of(taxCalculation));
+        when(invoiceRepository.existsByBillingSnapshotId(snapshotId)).thenReturn(false);
+        when(billingConfigurationService.getBillingConfiguration(any())).thenReturn(configuration());
+        when(paymentTermsMasterRepository.findById(paymentTermId)).thenReturn(Optional.of(paymentTerms()));
+        when(invoiceRepository.save(any(Invoice.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(billingSnapshotRepository.save(any(BillingSnapshot.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        InvoiceResponseDto response = invoiceService.generateInvoice(snapshotId);
+
+        assertThat(response.getItems()).hasSize(2);
+        assertThat(response.getItems().stream()
+                .filter(i -> "XMS-L1".equals(i.getSourceReferenceId()))).hasSize(1);
+        BigDecimal itemTotal = response.getItems().stream()
+                .map(i -> i.getAmount()).reduce(BigDecimal.ZERO, BigDecimal::add);
+        assertThat(itemTotal).isEqualByComparingTo("5550.00");
+        assertThat(response.getSubtotal()).isEqualByComparingTo("5550.00");
+        assertThat(response.getGrandTotal()).isEqualByComparingTo("6540.00");
     }
 
     // GET invoice by invoice id — new endpoint, reuses the same mapToResponse
@@ -2382,6 +2455,9 @@ class InvoiceServiceImplTest {
     // and a CORRECTED history entry is recorded.
     @Test
     void refreshAfterCorrection_rejectedInvoice_refreshesFinancialSnapshotAndRecordsCorrectedHistory() {
+        // refreshInvoiceFromAuthoritativeData copies the project dates from the billing configuration,
+        // which BillingConfigurationService always supplies (it throws ResourceNotFound, never null).
+        when(billingConfigurationService.getBillingConfiguration(any())).thenReturn(configuration());
         UUID invoiceId = UUID.randomUUID();
         Invoice invoice = persistedInvoice(
                 "INV-20260908170000", "BS-STALE", snapshotId,
@@ -2634,6 +2710,9 @@ class InvoiceServiceImplTest {
     // inconsistent with what was actually persisted).
     @Test
     void refreshAfterCorrection_persistenceFails_noHistoryRecorded() {
+        // refreshInvoiceFromAuthoritativeData copies the project dates from the billing configuration,
+        // which BillingConfigurationService always supplies (it throws ResourceNotFound, never null).
+        when(billingConfigurationService.getBillingConfiguration(any())).thenReturn(configuration());
         UUID invoiceId = UUID.randomUUID();
         Invoice invoice = persistedInvoice(
                 "INV-20260908170000", "BS-20260908164549", snapshotId,
@@ -2658,6 +2737,61 @@ class InvoiceServiceImplTest {
         // The @Transactional boundary rolls back the in-memory field/item/component
         // mutations at the database level; here we assert history is never even reached.
         verifyNoInteractions(invoiceApprovalHistoryRepository);
+    }
+
+    // Root-cause regression: a refresh needs the invoice's billing configuration. When it cannot be
+    // loaded the lookup throws ResourceNotFound, the refresh fails closed and nothing is persisted.
+    @Test
+    void refreshAfterCorrection_configurationMissing_failsClosedWithoutPersisting() {
+        UUID invoiceId = UUID.randomUUID();
+        Invoice invoice = persistedInvoice(
+                "INV-20260908170000", "BS-20260908164549", snapshotId,
+                "Account Management", "Website Redesign");
+        invoice.setInvoiceId(invoiceId);
+        invoice.setStatus(InvoiceStatus.REJECTED);
+        BillingSnapshot snapshot = taxCompletedSnapshot();
+        snapshot.setStatus(BillingSnapshotStatus.INVOICED);
+
+        when(invoiceRepository.findById(invoiceId)).thenReturn(Optional.of(invoice));
+        when(billingSnapshotRepository.findById(snapshotId)).thenReturn(Optional.of(snapshot));
+        when(taxCalculationRepository.findByBillingSnapshotId(snapshotId))
+                .thenReturn(Optional.of(completedTaxCalculation()));
+        when(billingConfigurationService.getBillingConfiguration(any()))
+                .thenThrow(new GlobalExceptionHandler.ResourceNotFoundException("Billing Configuration not found."));
+
+        assertThatThrownBy(() -> invoiceService.refreshAfterCorrection(invoiceId))
+                .isInstanceOf(GlobalExceptionHandler.ResourceNotFoundException.class);
+
+        verify(invoiceRepository, never()).save(any());
+        verifyNoInteractions(invoiceApprovalHistoryRepository);
+    }
+
+    // Root-cause regression: a refresh copies the project dates from the configuration onto the invoice.
+    @Test
+    void refreshAfterCorrection_copiesProjectDatesFromBillingConfiguration() {
+        UUID invoiceId = UUID.randomUUID();
+        Invoice invoice = persistedInvoice(
+                "INV-20260908170000", "BS-20260908164549", snapshotId,
+                "Account Management", "Website Redesign");
+        invoice.setInvoiceId(invoiceId);
+        invoice.setStatus(InvoiceStatus.REJECTED);
+        invoice.setProjectStartDate(null);
+        invoice.setProjectEndDate(null);
+        BillingSnapshot snapshot = taxCompletedSnapshot();
+        snapshot.setStatus(BillingSnapshotStatus.INVOICED);
+
+        when(invoiceRepository.findById(invoiceId)).thenReturn(Optional.of(invoice));
+        when(billingSnapshotRepository.findById(snapshotId)).thenReturn(Optional.of(snapshot));
+        when(taxCalculationRepository.findByBillingSnapshotId(snapshotId))
+                .thenReturn(Optional.of(completedTaxCalculation()));
+        when(paymentTermsMasterRepository.findById(paymentTermId)).thenReturn(Optional.of(paymentTerms()));
+        when(billingConfigurationService.getBillingConfiguration(any())).thenReturn(configuration());
+        when(invoiceRepository.save(any(Invoice.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        invoiceService.refreshAfterCorrection(invoiceId);
+
+        assertThat(invoice.getProjectStartDate()).isEqualTo(LocalDate.of(2026, 8, 19));
+        assertThat(invoice.getProjectEndDate()).isEqualTo(LocalDate.of(2026, 10, 7));
     }
 
     // RESUBMISSION SAFETY CASE 1 — A REJECTED invoice with no correction refresh cannot resubmit.
@@ -2729,6 +2863,9 @@ class InvoiceServiceImplTest {
     // rejection/correction cycles, driven entirely through the public service methods.
     @Test
     void fullCorrectionCycle_acrossTwoRejectionCycles_enforcesLatestCorrectionOnly() {
+        // refreshInvoiceFromAuthoritativeData copies the project dates from the billing configuration,
+        // which BillingConfigurationService always supplies (it throws ResourceNotFound, never null).
+        when(billingConfigurationService.getBillingConfiguration(any())).thenReturn(configuration());
         UUID invoiceId = UUID.randomUUID();
         Invoice invoice = persistedInvoice(
                 "INV-20260908170000", "BS-20260908164549", snapshotId,
@@ -3520,6 +3657,9 @@ class InvoiceServiceImplTest {
     // Test 7: repeated refresh replaces tax components; it never accumulates duplicates.
     @Test
     void refreshAfterCorrection_repeated_keepsExactlyTheCalculationsComponents() {
+        // refreshInvoiceFromAuthoritativeData copies the project dates from the billing configuration,
+        // which BillingConfigurationService always supplies (it throws ResourceNotFound, never null).
+        when(billingConfigurationService.getBillingConfiguration(any())).thenReturn(configuration());
         UUID invoiceId = UUID.randomUUID();
         Invoice invoice = persistedInvoice(
                 "INV-20260908170000", "BS-20260908164549", snapshotId,

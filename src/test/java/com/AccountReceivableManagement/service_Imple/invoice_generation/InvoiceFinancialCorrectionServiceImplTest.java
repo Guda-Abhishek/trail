@@ -63,6 +63,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -128,6 +129,10 @@ class InvoiceFinancialCorrectionServiceImplTest {
     @Mock
     private BillingTMRateCardRepository billingTMRateCardRepository;
 
+    // Unstubbed it returns no discount periods, so the existing scenarios are unaffected.
+    @Mock
+    private com.AccountReceivableManagement.repo.projectbilling_config.BillingTMRateDiscountRepository billingTMRateDiscountRepository;
+
     @Mock
     private PaymentTermsMasterRepository paymentTermsMasterRepository;
 
@@ -187,6 +192,8 @@ class InvoiceFinancialCorrectionServiceImplTest {
         // external boundaries - the same convention already used elsewhere.
         TimeAndMaterialBillingStrategy timeAndMaterialStrategy =
                 new TimeAndMaterialBillingStrategy(timesheetIntegration, billingTMRateCardRepository);
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                timeAndMaterialStrategy, "billingTMRateDiscountRepository", billingTMRateDiscountRepository);
 
         BillingSnapshotServiceImpl billingSnapshotService = new BillingSnapshotServiceImpl(
                 billingSnapshotRepository,
@@ -218,7 +225,8 @@ class InvoiceFinancialCorrectionServiceImplTest {
                 billingSnapshotRepository,
                 taxCalculationRepository,
                 billingConfigurationService,
-                paymentTermsMasterRepository);
+                paymentTermsMasterRepository,
+                org.mockito.Mockito.mock(com.AccountReceivableManagement.service_interface.concurrency_approval.RecordActionLockService.class));
 
         financialCorrectionService = new InvoiceFinancialCorrectionServiceImpl(
                 invoiceRepository,
@@ -433,6 +441,11 @@ class InvoiceFinancialCorrectionServiceImplTest {
 
         when(billingConfigurationIntegration.getApprovedBillingConfigurationById(configId))
                 .thenReturn(approvedTimeAndMaterialConfiguration());
+        // refreshInvoiceFromAuthoritativeData copies the project dates from the configuration.
+        when(billingConfigurationService.getBillingConfiguration(configId))
+                .thenReturn(com.AccountReceivableManagement.dto.projectbilling_config.BillingConfigurationResponseDto
+                        .builder().projectStartDate(LocalDate.of(2026, 8, 1))
+                        .projectEndDate(LocalDate.of(2026, 12, 31)).build());
         // TaxCalculationServiceImpl reads the configuration through the
         // repository (not BillingConfigurationService) for its response mapping.
         when(billingConfigurationRepository.findById(configId))
@@ -633,6 +646,102 @@ class InvoiceFinancialCorrectionServiceImplTest {
         // X — correctionRequired becomes false.
         assertThat(response.isCorrectionRequired()).isFalse();
         assertThat(response.getLastCorrectedAt()).isNotNull();
+    }
+
+
+    // -----------------------------------------------------------------
+    // End to end: rate schedule -> acquisition -> snapshot -> tax -> invoice, with real service logic and
+    // only persistence/integration boundaries mocked. Excluded work must be auditable but never payable.
+    // -----------------------------------------------------------------
+
+    private static com.AccountReceivableManagement.entity.projectbilling_config.BillingTMRateDiscount periodOn(
+            String name, String percent, LocalDate day, boolean include) {
+        return com.AccountReceivableManagement.entity.projectbilling_config.BillingTMRateDiscount.builder()
+                .discountId(UUID.randomUUID()).periodName(name)
+                .discountType(com.AccountReceivableManagement.entity_enums.projectbilling_config.DiscountType.PERCENTAGE)
+                .discountValue(new BigDecimal(percent)).effectiveFrom(day).effectiveTo(day)
+                .includeInInvoice(include).isActive(true).build();
+    }
+
+    @Test
+    void reacquireForFinancialCorrection_discountSchedule_snapshotTaxAndInvoiceReconcile() {
+        BillingSnapshot snapshot = invoicedSnapshotWithStaleItem();
+        TaxCalculation oldTaxCalculation = oldTaxCalculation();
+        wireStatefulMocks(snapshot, oldTaxCalculation);
+
+        BillingTMRateCard rateCard = BillingTMRateCard.builder().rateCardId(UUID.randomUUID())
+                .rate(new BigDecimal("800"))
+                .ratePeriod(com.AccountReceivableManagement.entity_enums.projectbilling_config.BillingRatePeriod.HOURLY)
+                .includeBaseRateInInvoice(true).isActive(true).build();
+        when(billingTMRateCardRepository.findActiveRatesByConfigurationAndDate(eq(configId), any()))
+                .thenReturn(List.of(rateCard));
+
+        // 08-10: 25% period, included -> 600/h.  08-11: 50% period, EXCLUDED -> 400/h (audit only).
+        // 08-20: no period -> base 800/h, included.
+        var launch = periodOn("Launch", "25", LocalDate.of(2026, 8, 10), true);
+        var goodwill = periodOn("Goodwill", "50", LocalDate.of(2026, 8, 11), false);
+        when(billingTMRateDiscountRepository.findActiveByRateCardAndDate(eq(rateCard.getRateCardId()), any()))
+                .thenAnswer(inv -> {
+                    LocalDate day = inv.getArgument(1);
+                    return day.equals(LocalDate.of(2026, 8, 10)) ? List.of(launch)
+                            : day.equals(LocalDate.of(2026, 8, 11)) ? List.of(goodwill) : List.of();
+                });
+
+        TimesheetDto d1 = correctedTimesheet(new BigDecimal("8"));
+        TimesheetDto d2 = correctedTimesheet(new BigDecimal("8"));
+        d2.setSourceReferenceId("TMS-002");
+        d2.setWorkDate(LocalDate.of(2026, 8, 11));
+        TimesheetDto d3 = correctedTimesheet(new BigDecimal("8"));
+        d3.setSourceReferenceId("TMS-003");
+        d3.setWorkDate(LocalDate.of(2026, 8, 20));
+        when(timesheetIntegration.getApprovedTimesheets(PROJECT_ID, PERIOD_START, PERIOD_END))
+                .thenReturn(List.of(d1, d2, d3));
+
+        InvoiceResponseDto response = financialCorrectionService.reacquireForFinancialCorrection(invoiceId);
+
+        // Snapshot: all three lines kept with their calculation; only two are payable.
+        assertThat(snapshot.getItems()).hasSize(3);
+        var s1 = byRef(snapshot, "TMS-001");
+        var s2 = byRef(snapshot, "TMS-002");
+        var s3 = byRef(snapshot, "TMS-003");
+        assertThat(s1.getBaseRate()).isEqualByComparingTo("800");
+        assertThat(s1.getDiscountAmount()).isEqualByComparingTo("200.00");
+        assertThat(s1.getRate()).isEqualByComparingTo("600.00");
+        assertThat(s1.getAmount()).isEqualByComparingTo("4800.00");
+        assertThat(s1.getDiscountPeriodName()).isEqualTo("Launch");
+        assertThat(s1.getIncludeInInvoice()).isTrue();
+        assertThat(s2.getAmount()).isEqualByComparingTo("3200.00");   // kept for audit
+        assertThat(s2.getIncludeInInvoice()).isFalse();
+        assertThat(s3.getRate()).isEqualByComparingTo("800.00");
+        assertThat(s3.getDiscountPeriodName()).isNull();
+        assertThat(s3.getIncludeInInvoice()).isTrue();
+
+        // Snapshot totals = payable lines only (4800 + 6400), reconciling with the stored line amounts.
+        assertThat(snapshot.getSubtotal()).isEqualByComparingTo("11200.00");
+        assertThat(snapshot.getTotalAmount()).isEqualByComparingTo("11200.00");
+        assertThat(snapshot.getItems().stream().filter(i -> !Boolean.FALSE.equals(i.getIncludeInInvoice()))
+                .map(com.AccountReceivableManagement.entity.billing_data_acquisition.BillingSnapshotItem::getAmount)
+                .reduce(BigDecimal.ZERO, BigDecimal::add)).isEqualByComparingTo(snapshot.getTotalAmount());
+
+        // Tax is calculated on the payable total only (18% = 9% + 9%).
+        assertThat(response.getSubtotal()).isEqualByComparingTo("11200.00");
+        assertThat(response.getTotalTaxAmount()).isEqualByComparingTo("2016.00");
+        assertThat(response.getGrandTotal()).isEqualByComparingTo("13216.00");
+        assertThat(response.getTaxComponents()).allSatisfy(c ->
+                assertThat(c.getTaxAmount()).isEqualByComparingTo("1008.00"));
+
+        // Invoice: the excluded line is not an item; items sum to the invoice subtotal.
+        assertThat(response.getItems()).extracting("sourceReferenceId")
+                .containsExactlyInAnyOrder("TMS-001", "TMS-003");
+        assertThat(response.getItems().stream()
+                .map(com.AccountReceivableManagement.dto.invoice_generation.InvoiceItemResponseDto::getAmount)
+                .reduce(BigDecimal.ZERO, BigDecimal::add)).isEqualByComparingTo(response.getSubtotal());
+    }
+
+    private com.AccountReceivableManagement.entity.billing_data_acquisition.BillingSnapshotItem byRef(
+            BillingSnapshot snapshot, String ref) {
+        return snapshot.getItems().stream().filter(i -> ref.equals(i.getSourceReferenceId()))
+                .findFirst().orElseThrow();
     }
 
     private BillingSnapshot argThatNot(BillingSnapshot expected) {

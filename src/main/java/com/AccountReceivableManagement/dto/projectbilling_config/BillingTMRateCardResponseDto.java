@@ -29,6 +29,8 @@ public class BillingTMRateCardResponseDto {
 
     private String remarks;
 
+    private Boolean includeBaseRateInInvoice;
+
     private LocalDateTime createdAt;
 
     private LocalDateTime updatedAt;

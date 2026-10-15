@@ -2,7 +2,9 @@ package com.AccountReceivableManagement.mapper.billing_data_acquisition;
 
 import com.AccountReceivableManagement.dto.billing_data_acquisition.BillingConfigurationResponseDto;
 import com.AccountReceivableManagement.dto.billing_data_acquisition.BillingSnapshotResponseDto;
+import com.AccountReceivableManagement.dto.billing_data_acquisition.BillingSnapshotResponseDto.ExpenseLineItemDto;
 import com.AccountReceivableManagement.dto.billing_data_acquisition.BillingSnapshotResponseDto.TimesheetLineItemDto;
+import com.AccountReceivableManagement.entity_enums.billing_data_acquisition.BillingItemType;
 import com.AccountReceivableManagement.entity.billing_data_acquisition.BillingSnapshot;
 import com.AccountReceivableManagement.entity.billing_data_acquisition.BillingSnapshotItem;
 import org.springframework.stereotype.Component;
@@ -25,9 +27,14 @@ import java.util.stream.Collectors;
 @Component
 public class BillingSnapshotMapper {
 
+    private static final com.fasterxml.jackson.databind.ObjectMapper METADATA_READER =
+            new com.fasterxml.jackson.databind.ObjectMapper();
+
     public BillingSnapshotResponseDto toResponse(BillingSnapshot snapshot, BillingConfigurationResponseDto configuration) {
 
         List<TimesheetLineItemDto> timesheetLineItems = snapshot.getItems().stream()
+                // Labor Charges only; XMS expense lines are not timesheets.
+                .filter(item -> item.getItemType() != com.AccountReceivableManagement.entity_enums.billing_data_acquisition.BillingItemType.EXPENSE)
                 .map(this::toTimesheetLineItemDto)
                 .collect(Collectors.toList());
 
@@ -56,7 +63,83 @@ public class BillingSnapshotMapper {
                 .totalAmount(snapshot.getTotalAmount())
                 .status(snapshot.getStatus())
                 .timesheets(timesheetLineItems)
+                .expenses(snapshot.getItems().stream()
+                        .filter(item -> item.getItemType() == BillingItemType.EXPENSE)
+                        .map(item -> toExpenseLineItemDto(item, snapshot.getCurrencyCode()))
+                        .collect(Collectors.toList()))
                 .build();
+    }
+
+    private ExpenseLineItemDto toExpenseLineItemDto(BillingSnapshotItem item, String snapshotCurrency) {
+        // Everything here is read back from what was persisted at acquisition - amounts are never
+        // recalculated or reconverted while mapping. Unreadable metadata only costs the optional
+        // display fields, never the line itself.
+        com.fasterxml.jackson.databind.JsonNode meta = readMetadata(item.getSourceMetadata());
+        boolean converted = item.getExchangeRate() != null;
+        String metaCurrency = text(meta, "currency");
+        // A persisted conversion fixes the billed currency; otherwise it is what XMS supplied.
+        String currency = converted && item.getTargetCurrency() != null ? item.getTargetCurrency()
+                : metaCurrency != null ? metaCurrency : snapshotCurrency;
+        return ExpenseLineItemDto.builder()
+                .sourceReferenceId(item.getSourceReferenceId())
+                .lineItemId(item.getSourceReferenceId())
+                .expenseDate(item.getWorkDate())
+                .category(item.getItemName())
+                .description(text(meta, "description"))
+                .reportNumber(text(meta, "reportNumber"))
+                .currency(currency)
+                .costBasis(item.getAmount())
+                .sourceSystem(item.getSourceSystem())
+                .syncId(item.getSourceEventId())
+                .handedOffAt(dateTime(meta, "handedOffAt"))
+                .handoffRemarks(text(meta, "handoffRemarks"))
+                .supersededSyncIds(textList(meta, "supersededSyncIds"))
+                .originalCurrency(text(meta, "originalCurrency"))
+                .originalAmount(decimal(meta, "originalAmount"))
+                .conversionApplied(converted)
+                .sourceAmount(item.getSourceAmount())
+                .sourceCurrency(item.getSourceCurrency())
+                .exchangeRate(item.getExchangeRate())
+                .exchangeRateDate(item.getExchangeRateDate())
+                .exchangeRateSource(item.getExchangeRateSource())
+                .build();
+    }
+
+    private static java.time.LocalDateTime dateTime(com.fasterxml.jackson.databind.JsonNode node, String field) {
+        String value = text(node, field);
+        try {
+            return value == null ? null : java.time.LocalDateTime.parse(value);
+        } catch (java.time.format.DateTimeParseException ex) {
+            return null;
+        }
+    }
+
+    private static java.math.BigDecimal decimal(com.fasterxml.jackson.databind.JsonNode node, String field) {
+        return node != null && node.hasNonNull(field) && node.get(field).isNumber()
+                ? node.get(field).decimalValue() : null;
+    }
+
+    private static List<String> textList(com.fasterxml.jackson.databind.JsonNode node, String field) {
+        List<String> values = new java.util.ArrayList<>();
+        if (node != null && node.hasNonNull(field) && node.get(field).isArray()) {
+            node.get(field).forEach(v -> values.add(v.asText()));
+        }
+        return values;
+    }
+
+    private static com.fasterxml.jackson.databind.JsonNode readMetadata(String json) {
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
+            return METADATA_READER.readTree(json);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException ex) {
+            return null;
+        }
+    }
+
+    private static String text(com.fasterxml.jackson.databind.JsonNode node, String field) {
+        return node != null && node.hasNonNull(field) ? node.get(field).asText() : null;
     }
 
     private TimesheetLineItemDto toTimesheetLineItemDto(BillingSnapshotItem item) {
@@ -69,6 +152,17 @@ public class BillingSnapshotMapper {
                 .amount(item.getAmount())
                 .approvalStatus(item.getApprovalStatus())
                 .role(item.getRole())
+                .baseRate(item.getBaseRate())
+                .currencyCode(item.getRateCurrency())
+                .ratePeriod(item.getRatePeriod())
+                .discountType(item.getDiscountType())
+                .discountValue(item.getDiscountValue())
+                .discountAmount(item.getDiscountAmount())
+                .discountPeriodName(item.getDiscountPeriodName())
+                .discountPeriodStart(item.getDiscountPeriodStart())
+                .discountPeriodEnd(item.getDiscountPeriodEnd())
+                .includeInInvoice(com.AccountReceivableManagement.util.TmRateCalculator
+                        .isIncluded(item.getIncludeInInvoice()))
                 .build();
     }
 }

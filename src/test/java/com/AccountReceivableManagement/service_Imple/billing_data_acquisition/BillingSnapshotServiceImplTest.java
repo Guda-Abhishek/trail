@@ -394,6 +394,98 @@ class BillingSnapshotServiceImplTest {
         assertThat(response.getData().getTotalAmount()).isEqualByComparingTo(BigDecimal.valueOf(1320));
     }
 
+    // XMS expenses are an additional source: costBasis is summed as-is into
+    // expenseAmount/totalAmount (the amount tax calculation runs on), persisted
+    // as EXPENSE snapshot items, and kept out of the Labor Charges list.
+    @Test
+    void createBillingSnapshot_withXmsExpenses_persistsExpenseItemsAndTotals() {
+        BillingSnapshotCreateRequestDto request = BillingSnapshotCreateRequestDto.builder()
+                .projectId(PROJECT_ID).billingPeriodStart(PERIOD_START).billingPeriodEnd(PERIOD_END).build();
+
+        when(billingSnapshotRepository.findByProjectIdAndBillingPeriodStartAndBillingPeriodEnd(
+                PROJECT_ID, PERIOD_START, PERIOD_END)).thenReturn(Optional.empty());
+
+        UUID configurationId = UUID.randomUUID();
+        BillingConfigurationResponseDto configuration = BillingConfigurationResponseDto.builder()
+                .billingConfigurationId(configurationId)
+                .billingType(BillingType.TIME_AND_MATERIAL).billingTypeName("Timesheet Based")
+                .currencyId(UUID.randomUUID()).currencyCode("USD").taxRegionCode("DOM")
+                .expenseEligible(true).approved(true).build();
+        when(billingConfigurationIntegration.getApprovedBillingConfiguration(PROJECT_ID)).thenReturn(configuration);
+        when(projectMasterDataService.getClientIdByProjectId(PROJECT_ID)).thenReturn(UUID.randomUUID());
+        when(projectMasterReferenceRepository.findBypmsProjectId(PROJECT_ID)).thenReturn(Optional.of(
+                ProjectMasterReference.builder().pmsProjectId(PROJECT_ID).primaryLocation("Domestic").build()));
+        when(taxRegionMasterRepository.findByTaxRegionNameIgnoreCase("Domestic"))
+                .thenReturn(Optional.of(TaxRegionMaster.builder().taxRegionCode("DOM").build()));
+
+        TimesheetDto timesheet = TimesheetDto.builder().resourceId(1L).resourceName("Jane Doe")
+                .sourceReferenceId("TMS-100").workDate(LocalDate.of(2026, 8, 10))
+                .hours(BigDecimal.valueOf(8)).hourlyRate(BigDecimal.valueOf(165)).role("Developer")
+                .approvalStatus("APPROVED").approved(true).billable(true).build();
+        com.AccountReceivableManagement.dto.billing_data_acquisition.ExpenseLineDto expense =
+                com.AccountReceivableManagement.dto.billing_data_acquisition.ExpenseLineDto.builder()
+                        .lineItemId("XMS-L1").category("Travel").expenseDate(LocalDate.of(2026, 8, 12))
+                        .costBasis(new BigDecimal("50.00")).currency("USD")
+                        .grossAmount(new BigDecimal("60.00")).recoverableTaxAmount(new BigDecimal("10.00")).build();
+        when(timeAndMaterialStrategy.acquire(configuration, request)).thenReturn(
+                BillingAcquisitionResultDto.builder().billingConfigurationId(configurationId)
+                        .timesheets(List.of(timesheet)).expenses(List.of(expense)).build());
+
+        ArgumentCaptor<BillingSnapshot> savedCaptor = ArgumentCaptor.forClass(BillingSnapshot.class);
+        when(billingSnapshotRepository.saveAndFlush(savedCaptor.capture()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        ApiResponse<BillingSnapshotResponseDto> response = service.createBillingSnapshot(request);
+
+        assertThat(response.isSuccess()).isTrue();
+        BillingSnapshot persisted = savedCaptor.getValue();
+        assertThat(persisted.getSubtotal()).isEqualByComparingTo("1320");
+        assertThat(persisted.getExpenseAmount()).isEqualByComparingTo("50.00");
+        assertThat(persisted.getTotalAmount()).isEqualByComparingTo("1370.00");
+        assertThat(persisted.getItems()).hasSize(2);
+        BillingSnapshotItem expenseItem = persisted.getItems().stream()
+                .filter(i -> i.getItemType() == BillingItemType.EXPENSE).findFirst().orElseThrow();
+        assertThat(expenseItem.getSourceReferenceId()).isEqualTo("XMS-L1");
+        assertThat(expenseItem.getAmount()).isEqualByComparingTo("50.00");
+        assertThat(expenseItem.getBillingSnapshot()).isSameAs(persisted);
+
+        // Labor Charges list stays labor-only; the total includes expenses.
+        assertThat(response.getData().getTimesheets()).hasSize(1);
+        assertThat(response.getData().getTotalAmount()).isEqualByComparingTo("1370.00");
+    }
+
+    // XMS failing for an expense-eligible project aborts creation: nothing is
+    // persisted (no labor-only snapshot silently missing its expenses) and the
+    // integration error reaches the caller as-is, not as an empty expense list.
+    @Test
+    void createBillingSnapshot_xmsFailure_persistsNothingAndSurfacesTheIntegrationError() {
+        BillingSnapshotCreateRequestDto request = BillingSnapshotCreateRequestDto.builder()
+                .projectId(PROJECT_ID).billingPeriodStart(PERIOD_START).billingPeriodEnd(PERIOD_END).build();
+        when(billingSnapshotRepository.findByProjectIdAndBillingPeriodStartAndBillingPeriodEnd(
+                PROJECT_ID, PERIOD_START, PERIOD_END)).thenReturn(Optional.empty());
+        BillingConfigurationResponseDto configuration = BillingConfigurationResponseDto.builder()
+                .billingConfigurationId(UUID.randomUUID()).billingType(BillingType.TIME_AND_MATERIAL)
+                .currencyId(UUID.randomUUID()).currencyCode("USD").taxRegionCode("DOM")
+                .expenseEligible(true).approved(true).build();
+        when(billingConfigurationIntegration.getApprovedBillingConfiguration(PROJECT_ID)).thenReturn(configuration);
+        when(projectMasterDataService.getClientIdByProjectId(PROJECT_ID)).thenReturn(UUID.randomUUID());
+        when(projectMasterReferenceRepository.findBypmsProjectId(PROJECT_ID)).thenReturn(Optional.of(
+                ProjectMasterReference.builder().pmsProjectId(PROJECT_ID).primaryLocation("Domestic").build()));
+        when(taxRegionMasterRepository.findByTaxRegionNameIgnoreCase("Domestic"))
+                .thenReturn(Optional.of(TaxRegionMaster.builder().taxRegionCode("DOM").build()));
+        when(timeAndMaterialStrategy.acquire(configuration, request)).thenThrow(
+                new com.AccountReceivableManagement.integration.expense_management.XmsIntegrationException(
+                        com.AccountReceivableManagement.integration.expense_management.XmsIntegrationException.Kind.UNAVAILABLE,
+                        500, "XMS call failed with status 500 (eligible-expenses)."));
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.createBillingSnapshot(request))
+                .isInstanceOf(com.AccountReceivableManagement.integration.expense_management.XmsIntegrationException.class)
+                .hasMessageContaining("status 500");
+
+        verify(billingSnapshotRepository, never()).saveAndFlush(any());
+        verify(billingSnapshotRepository, never()).save(any());
+    }
+
     // =========================================================
     // F. Empty items are allowed on retrieval — not an error state
     // =========================================================
@@ -548,6 +640,99 @@ class BillingSnapshotServiceImplTest {
         assertThat(snapshot.getItems().get(0).getQuantity()).isEqualByComparingTo("11");
         assertThat(snapshot.getTotalAmount()).isEqualByComparingTo("8800");
         verify(billingSnapshotRepository, never()).save(any());
+    }
+
+    @Test
+    void rebuildBillingSnapshot_keepsTheFrozenConversionOfAnExpenseAlreadyConverted() {
+        BillingSnapshot snapshot = mutableExistingSnapshot();
+        snapshot.getItems().add(BillingSnapshotItem.builder()
+                .itemType(BillingItemType.EXPENSE).sourceReferenceId("XMS-L9").amount(new BigDecimal("5.00"))
+                .sourceAmount(new BigDecimal("400.0000")).sourceCurrency("INR").targetCurrency("USD")
+                .exchangeRate(new BigDecimal("0.01250000")).exchangeRateDate(LocalDate.of(2026, 8, 12))
+                .exchangeRateSource("FROZEN-REF").build());
+        when(billingSnapshotRepository.findById(snapshotId)).thenReturn(Optional.of(snapshot));
+        BillingConfigurationResponseDto configuration = approvedTimeAndMaterialConfiguration(orphanedConfigurationId);
+        when(billingConfigurationIntegration.getApprovedBillingConfigurationById(orphanedConfigurationId))
+                .thenReturn(configuration);
+
+        TimesheetDto timesheet = TimesheetDto.builder().resourceId(1L).resourceName("Jane Doe")
+                .sourceReferenceId("TMS-001").workDate(LocalDate.of(2026, 8, 10)).hours(BigDecimal.valueOf(8))
+                .hourlyRate(BigDecimal.valueOf(800)).role("Developer").approvalStatus("APPROVED")
+                .approved(true).billable(true).build();
+        // XMS still reports the same source amount, but a re-acquisition now yields a DIFFERENT rate.
+        com.AccountReceivableManagement.dto.billing_data_acquisition.ExpenseLineDto reconverted =
+                com.AccountReceivableManagement.dto.billing_data_acquisition.ExpenseLineDto.builder()
+                        .lineItemId("XMS-L9").category("Hotel").expenseDate(LocalDate.of(2026, 8, 12))
+                        .costBasis(new BigDecimal("6.00")).currency("USD")
+                        .sourceAmount(new BigDecimal("400.0000")).sourceCurrency("INR")
+                        .exchangeRate(new BigDecimal("0.01500000")).exchangeRateDate(LocalDate.of(2026, 8, 13))
+                        .exchangeRateSource("NEWER-REF").build();
+        when(timeAndMaterialStrategy.acquire(eq(configuration), any(BillingSnapshotCreateRequestDto.class)))
+                .thenReturn(BillingAcquisitionResultDto.builder().billingConfigurationId(orphanedConfigurationId)
+                        .timesheets(List.of(timesheet)).expenses(List.of(reconverted)).build());
+        when(billingSnapshotRepository.save(any(BillingSnapshot.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        BillingSnapshot result = service.rebuildBillingSnapshot(snapshotId);
+
+        BillingSnapshotItem expense = result.getItems().stream()
+                .filter(i -> i.getItemType() == BillingItemType.EXPENSE).findFirst().orElseThrow();
+        assertThat(expense.getAmount()).isEqualByComparingTo("5.00");
+        assertThat(expense.getExchangeRate()).isEqualByComparingTo("0.0125");
+        assertThat(expense.getExchangeRateSource()).isEqualTo("FROZEN-REF");
+        assertThat(result.getExpenseAmount()).isEqualByComparingTo("5.00");
+        assertThat(result.getTotalAmount()).isEqualByComparingTo("6405.00");
+    }
+
+    @Test
+    void createBillingSnapshot_withConvertedExpense_totalsContainOnlyBillingCurrencyAmounts() {
+        BillingSnapshotCreateRequestDto request = BillingSnapshotCreateRequestDto.builder()
+                .projectId(PROJECT_ID).billingPeriodStart(PERIOD_START).billingPeriodEnd(PERIOD_END).build();
+        when(billingSnapshotRepository.findByProjectIdAndBillingPeriodStartAndBillingPeriodEnd(
+                PROJECT_ID, PERIOD_START, PERIOD_END)).thenReturn(Optional.empty());
+        UUID configurationId = UUID.randomUUID();
+        BillingConfigurationResponseDto configuration = BillingConfigurationResponseDto.builder()
+                .billingConfigurationId(configurationId)
+                .billingType(BillingType.TIME_AND_MATERIAL).billingTypeName("Timesheet Based")
+                .currencyId(UUID.randomUUID()).currencyCode("USD").taxRegionCode("DOM")
+                .expenseEligible(true).approved(true).build();
+        when(billingConfigurationIntegration.getApprovedBillingConfiguration(PROJECT_ID)).thenReturn(configuration);
+        when(projectMasterDataService.getClientIdByProjectId(PROJECT_ID)).thenReturn(UUID.randomUUID());
+        when(projectMasterReferenceRepository.findBypmsProjectId(PROJECT_ID)).thenReturn(Optional.of(
+                ProjectMasterReference.builder().pmsProjectId(PROJECT_ID).primaryLocation("Domestic").build()));
+        when(taxRegionMasterRepository.findByTaxRegionNameIgnoreCase("Domestic"))
+                .thenReturn(Optional.of(TaxRegionMaster.builder().taxRegionCode("DOM").build()));
+        TimesheetDto timesheet = TimesheetDto.builder().resourceId(1L).resourceName("Jane Doe")
+                .sourceReferenceId("TMS-100").workDate(LocalDate.of(2026, 8, 10))
+                .hours(BigDecimal.valueOf(8)).hourlyRate(BigDecimal.valueOf(165)).role("Developer")
+                .approvalStatus("APPROVED").approved(true).billable(true).build();
+        // costBasis here is the already-converted USD amount; the INR original is audit-only.
+        com.AccountReceivableManagement.dto.billing_data_acquisition.ExpenseLineDto converted =
+                com.AccountReceivableManagement.dto.billing_data_acquisition.ExpenseLineDto.builder()
+                        .lineItemId("XMS-L9").category("Hotel").expenseDate(LocalDate.of(2026, 8, 12))
+                        .costBasis(new BigDecimal("5.00")).currency("USD")
+                        .sourceAmount(new BigDecimal("400.0000")).sourceCurrency("INR")
+                        .exchangeRate(new BigDecimal("0.01250000")).exchangeRateDate(LocalDate.of(2026, 8, 12))
+                        .exchangeRateSource("TEST-REF").build();
+        when(timeAndMaterialStrategy.acquire(configuration, request)).thenReturn(
+                BillingAcquisitionResultDto.builder().billingConfigurationId(configurationId)
+                        .timesheets(List.of(timesheet)).expenses(List.of(converted)).build());
+        ArgumentCaptor<BillingSnapshot> savedCaptor = ArgumentCaptor.forClass(BillingSnapshot.class);
+        when(billingSnapshotRepository.saveAndFlush(savedCaptor.capture()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        ApiResponse<BillingSnapshotResponseDto> response = service.createBillingSnapshot(request);
+
+        assertThat(response.isSuccess()).isTrue();
+        BillingSnapshot persisted = savedCaptor.getValue();
+        assertThat(persisted.getCurrencyCode()).isEqualTo("USD");
+        assertThat(persisted.getExpenseAmount()).isEqualByComparingTo("5.00");   // never 400 (INR)
+        assertThat(persisted.getTotalAmount()).isEqualByComparingTo("1325.00");  // 1320 labor + 5 expense
+        BillingSnapshotItem item = persisted.getItems().stream()
+                .filter(i -> i.getItemType() == BillingItemType.EXPENSE).findFirst().orElseThrow();
+        assertThat(item.getAmount()).isEqualByComparingTo("5.00");
+        assertThat(item.getSourceAmount()).isEqualByComparingTo("400.0000");
+        assertThat(item.getExchangeRateSource()).isEqualTo("TEST-REF");
     }
 
     @Test
@@ -722,6 +907,55 @@ class BillingSnapshotServiceImplTest {
         verify(transactionManager, times(1)).getTransaction(any());
         verify(transactionManager).commit(any());
         verify(transactionManager, never()).rollback(any());
+    }
+
+    @Test
+    void createBillingSnapshot_conversionFailsDuringAcquisition_nothingIsPersistedAndNoTransactionIsStarted() {
+        BillingSnapshotCreateRequestDto request = newRequest();
+        when(billingSnapshotRepository.findByProjectIdAndBillingPeriodStartAndBillingPeriodEnd(
+                PROJECT_ID, PERIOD_START, PERIOD_END)).thenReturn(Optional.empty());
+        stubConfigurationAndJurisdictions();
+        // Labor was acquired fine; an expense then fails currency conversion inside the same acquisition.
+        when(timeAndMaterialStrategy.acquire(any(), eq(request))).thenThrow(new GlobalExceptionHandler.ValidationException(
+                "XMS expense [L9] rejected: Expense currency conversion failed: no approved exchange rate is available "
+                        + "for INR to USD on 2026-08-12"));
+
+        assertThatThrownBy(() -> service.createBillingSnapshot(request))
+                .isInstanceOf(GlobalExceptionHandler.ValidationException.class)
+                .hasMessageContaining("currency conversion failed");
+
+        // Acquisition runs before the persistence transaction: the failure leaves no snapshot behind.
+        verify(billingSnapshotRepository, never()).saveAndFlush(any());
+        verify(billingAcquisitionService, never()).createManualAcquisition(any(), any(), any(), any(), any());
+        verify(transactionManager, never()).getTransaction(any());
+    }
+
+    @Test
+    void createBillingSnapshot_persistenceFailsForAMixedConvertedSnapshot_rollsBackAndReportsFailure() {
+        BillingSnapshotCreateRequestDto request = newRequest();
+        when(billingSnapshotRepository.findByProjectIdAndBillingPeriodStartAndBillingPeriodEnd(
+                PROJECT_ID, PERIOD_START, PERIOD_END)).thenReturn(Optional.empty());
+        BillingConfigurationResponseDto configuration = stubConfigurationAndJurisdictions();
+        com.AccountReceivableManagement.dto.billing_data_acquisition.ExpenseLineDto converted =
+                com.AccountReceivableManagement.dto.billing_data_acquisition.ExpenseLineDto.builder()
+                        .lineItemId("XMS-L9").category("Hotel").expenseDate(LocalDate.of(2026, 8, 12))
+                        .costBasis(new BigDecimal("5.00")).currency("USD")
+                        .sourceAmount(new BigDecimal("400.0000")).sourceCurrency("INR")
+                        .exchangeRate(new BigDecimal("0.01250000")).exchangeRateDate(LocalDate.of(2026, 8, 12))
+                        .exchangeRateSource("TEST-REF").build();
+        when(timeAndMaterialStrategy.acquire(configuration, request)).thenReturn(
+                BillingAcquisitionResultDto.builder().billingConfigurationId(NEW_CONFIGURATION_ID)
+                        .timesheets(List.of(timesheet(true))).expenses(List.of(converted)).build());
+        when(billingSnapshotRepository.saveAndFlush(any())).thenThrow(new RuntimeException("insert failed"));
+
+        ApiResponse<BillingSnapshotResponseDto> response = service.createBillingSnapshot(request);
+
+        assertThat(response.isSuccess()).isFalse();
+        assertThat(response.getMessage()).startsWith("Failed to save Billing Snapshot");
+        verify(transactionManager).rollback(any());
+        verify(transactionManager, never()).commit(any());
+        // The acquisition record is only written after the snapshot - never for a snapshot that was not saved.
+        verify(billingAcquisitionService, never()).createManualAcquisition(any(), any(), any(), any(), any());
     }
 
     @Test

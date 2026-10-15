@@ -31,7 +31,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * MethodArgumentNotValidException handler) instead of falling through
  * to the generic HTTP 500 handler.
  */
+// Security filters are switched off: this test is about bean validation and the exception handler. With
+// Spring Security on the classpath the slice otherwise applies the default chain (CSRF + authentication),
+// which answers 403 before the controller is reached.
 @WebMvcTest(TaxConfigurationController.class)
+@org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc(addFilters = false)
 class TaxConfigurationControllerValidationTest {
 
     @Autowired

@@ -296,6 +296,7 @@ public class InvoiceServiceImpl implements InvoiceService {
                         .sellerEmail(companyProfile.getEmail())
                         .sellerPhone(companyProfile.getPhone())
                         .sellerLogoReference(companyProfile.getLogoReference())
+                        .sellerSignatureReference(companyProfile.getAuthorizedSignatureReference())
                         .invoiceNotes(companyProfile.getDefaultInvoiceNotes())
                         .termsAndConditions(companyProfile.getDefaultTermsAndConditions())
                         .paymentInstructions(companyProfile.getDefaultPaymentInstructions())
@@ -330,6 +331,11 @@ public class InvoiceServiceImpl implements InvoiceService {
                 BillingSnapshotItem snapshotItem
                 : snapshot.getItems()
         ) {
+
+            if (!com.AccountReceivableManagement.util.TmRateCalculator
+                    .isIncluded(snapshotItem.getIncludeInInvoice())) {
+                continue;
+            }
 
             InvoiceItem invoiceItem =
                     InvoiceItem.builder()
@@ -556,6 +562,7 @@ public class InvoiceServiceImpl implements InvoiceService {
                         .sellerEmail(companyProfile.getEmail())
                         .sellerPhone(companyProfile.getPhone())
                         .sellerLogoReference(companyProfile.getLogoReference())
+                        .sellerSignatureReference(companyProfile.getAuthorizedSignatureReference())
                         .invoiceNotes(companyProfile.getDefaultInvoiceNotes())
                         .termsAndConditions(companyProfile.getDefaultTermsAndConditions())
                         .paymentInstructions(companyProfile.getDefaultPaymentInstructions())
@@ -688,6 +695,8 @@ public class InvoiceServiceImpl implements InvoiceService {
         // recomputed or aggregated); ordered by work date, then resource.
         List<BillingSnapshotItem> snapshotItems =
                 snapshot.getItems().stream()
+                        .filter(item -> com.AccountReceivableManagement.util.TmRateCalculator
+                                .isIncluded(item.getIncludeInInvoice()))
                         .sorted(java.util.Comparator
                                 .comparing(
                                         BillingSnapshotItem::getWorkDate,
@@ -763,6 +772,7 @@ public class InvoiceServiceImpl implements InvoiceService {
                 .sellerEmail(companyProfile != null ? companyProfile.getEmail() : null)
                 .sellerPhone(companyProfile != null ? companyProfile.getPhone() : null)
                 .sellerLogoReference(companyProfile != null ? companyProfile.getLogoReference() : null)
+                .sellerSignatureReference(companyProfile != null ? companyProfile.getAuthorizedSignatureReference() : null)
                 .invoiceNotes(companyProfile != null ? companyProfile.getDefaultInvoiceNotes() : null)
                 .termsAndConditions(companyProfile != null ? companyProfile.getDefaultTermsAndConditions() : null)
                 .paymentInstructions(companyProfile != null ? companyProfile.getDefaultPaymentInstructions() : null)
@@ -1334,6 +1344,11 @@ public class InvoiceServiceImpl implements InvoiceService {
                 : snapshot.getItems()
         ) {
 
+            if (!com.AccountReceivableManagement.util.TmRateCalculator
+                    .isIncluded(snapshotItem.getIncludeInInvoice())) {
+                continue;
+            }
+
             invoice.getItems().add(
                     InvoiceItem.builder()
                             .invoice(invoice)
@@ -1847,6 +1862,7 @@ public class InvoiceServiceImpl implements InvoiceService {
                 .sellerEmail(invoice.getSellerEmail())
                 .sellerPhone(invoice.getSellerPhone())
                 .sellerLogoReference(invoice.getSellerLogoReference())
+                .sellerSignatureReference(invoice.getSellerSignatureReference())
                 .invoiceNotes(invoice.getInvoiceNotes())
                 .termsAndConditions(invoice.getTermsAndConditions())
                 .paymentInstructions(invoice.getPaymentInstructions())

@@ -50,6 +50,14 @@ public class BillingTMRateCard{
     @Column(name = "remarks", length = 500)
     private String remarks;
 
+    /**
+     * Whether work billed at this card's base rate (no discount period applies on the work date) is billed.
+     * Independent of {@code includeInInvoice} on each discount period. Null (rows created before this
+     * column existed) means included.
+     */
+    @Column(name = "include_base_rate_in_invoice")
+    private Boolean includeBaseRateInInvoice;
+
     @Column(name = "is_active")
     private Boolean isActive;
 
